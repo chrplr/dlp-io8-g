@@ -66,7 +66,13 @@ To use it under Python, you need to install `pyserial`:
 
      pip install pyserial
 
-Here is an example to send TTL on/off signals on Chanel 1:
+
+And add yourself to the `tty` and `dialup` groups:
+
+    sudo usermod -a -G tty [yourlogin]
+    sudo usermod -a -G dialout [yourlogin]
+    
+## Example of using the DLP-IO8 to send TTL signals on Chanel 1
 
 ```{Python}
 from serial import Serial
