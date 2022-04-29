@@ -10,7 +10,7 @@ It works out of the box under Linux as the FTDI VCP driver is present in the Lin
 Here is the list of commands:
 
 | ASCII |  Hex | Description       | Return                             |
-|-------+------+-------------------+------------------------------------|
+|-------|------|-------------------|------------------------------------|
 | 1     | 0x31 | Ch1 Digital Out 1 |                                    |
 | Q     | 0x51 | Ch1 Digitil Out 0 |                                    |
 | A     | 0x41 | Ch1 Digital In    | 0 or 1                             |
