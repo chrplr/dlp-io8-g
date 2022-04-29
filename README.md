@@ -1,6 +1,8 @@
 # dlp-io8-g
 Python code to control the DLP-IO8-G USB-to-TTL device
 
+![](dlp-io8-g-800.png)
+
 The DLP-IO8-G is a simple USB data acquisition module which permits to receive or send TTL signals on 8 lines using a simple serial protocol  (Note that DLP design also manufactures modules with with 14 or 20 lines (see <http://www.dlpdesign.com/usb/>))
 
 It works out of the box under Linux as the FTDI VCP driver is present in the Linux kernel.
