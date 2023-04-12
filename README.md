@@ -83,5 +83,5 @@ ON1 = b'1'
 dlp.write(ON1)
 
 OFF1 = b'Q'
-delp.write(OFF1)
+dlp.write(OFF1)
 ```
