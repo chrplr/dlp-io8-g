@@ -79,9 +79,22 @@ from serial import Serial
 
 dlp = Serial(port='/dev/ttyUSB0', baudrate=115200)  # open serial port
 
+dlp.write(b'QWERTYUI')  # set all lines to '0'
+dlp.write(b'12345678')  # set all lines to '1'
+
+
+
 ON1 = b'1'
-dlp.write(ON1)
+ON2 = b'2'
+ON3 = b'3'
+ON4 = b'4'
+dlp.write(ON1 + ON2 + ON3 + ON4)
 
 OFF1 = b'Q'
-dlp.write(OFF1)
+OFF2 = b'W'
+OFF3 = b'E'
+OFF4 = b'R'
+dlp.write(OFF1 + ON2 + ON3 + ON4)
+
+
 ```
