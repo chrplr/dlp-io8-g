@@ -1,11 +1,13 @@
 # dlp-io8-g
-Python code to control the DLP-IO8-G USB-to-TTL device
+Python code to control the DLP-IO8-G USB-to-TTL device.
 
 ![](dlp-io8-g-800.png)
 
 The DLP-IO8-G is a simple USB data acquisition module which permits to receive or send TTL signals on 8 lines using a simple serial protocol  (Note that DLP design also manufactures modules with with 14 or 20 lines (see <http://www.dlpdesign.com/usb/>))
 
-It works out of the box under Linux as the FTDI VCP driver is present in the Linux kernel.
+**It works out of the box under Linux as the FTDI VCP driver is present in the Linux kernel**.
+
+From a software point of view, it appears as a serial device which can be controlled by writing and reading characters.
 
 Here is the list of commands:
 
@@ -72,12 +74,29 @@ Under Linux, add yourself to the `tty` and `dialup` groups:
 
     sudo usermod -a -G tty [yourlogin]
     sudo usermod -a -G dialout [yourlogin]
-    
+
+
+## Determine the serial port (Linux)
+
+Once plugged, to determine the serial port the dlp-io8-g is attached to, type the
+command `dmesg` in a Terminal. You should get something like::
+
+
+    [ 5128.109725] usbcore: registered new interface driver usbserial_generic
+    [ 5128.109730] usbserial: USB Serial support registered for generic
+    [ 5128.112142] usbcore: registered new interface driver ftdi_sio
+    [ 5128.112148] usbserial: USB Serial support registered for FTDI USB Serial Device
+    [ 5128.112175] ftdi_sio 1-1:1.0: FTDI USB Serial Device converter detected
+    [ 5128.112190] usb 1-1: Detected FT232RL
+    [ 5128.113130] usb 1-1: FTDI USB Serial Device converter now attached to ttyUSB0
+
+The last line tells you that the device is at `/dev/ttyUSB0`.
+
 ## Examples 
 
 ### Simple test
 
-```{python}
+```python
 from serial import Serial
 
 dlp = Serial(port='/dev/ttyUSB0', baudrate=115200)  # open serial port
@@ -100,7 +119,7 @@ dlp.write(OFF1 + ON2 + ON3 + ON4)
 
 ### Sending pulses at regular intervals
 
-```{python}
+```python
 
   #! /usr/bin/env python3
 
@@ -158,7 +177,7 @@ Here is the result on an oscilloscope:
 
 ### Reading an input line
 
-```{python}
+```python
    import time
    import serial
    import numpy as np
