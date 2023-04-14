@@ -61,28 +61,29 @@ Here is the list of commands:
 
 A full description of the device is available at <http://www.ftdichip.com/Support/Documents/DataSheets/DLP/dlp-io8-ds-v15.pdf>
 
+## Installation
 
 To use it under Python, you need to install `pyserial`:
 
      pip install pyserial
 
 
-And add yourself to the `tty` and `dialup` groups:
+Under Linux, add yourself to the `tty` and `dialup` groups:
 
     sudo usermod -a -G tty [yourlogin]
     sudo usermod -a -G dialout [yourlogin]
     
-## Example of using the DLP-IO8 to send TTL signals on Chanel 1
+## Examples 
 
-```{Python}
+### Simple test
+
+```{python}
 from serial import Serial
 
 dlp = Serial(port='/dev/ttyUSB0', baudrate=115200)  # open serial port
 
 dlp.write(b'QWERTYUI')  # set all lines to '0'
 dlp.write(b'12345678')  # set all lines to '1'
-
-
 
 ON1 = b'1'
 ON2 = b'2'
@@ -95,6 +96,90 @@ OFF2 = b'W'
 OFF3 = b'E'
 OFF4 = b'R'
 dlp.write(OFF1 + ON2 + ON3 + ON4)
+```
 
+### Sending pulses at regular intervals
+
+```{python}
+
+  #! /usr/bin/env python3
+
+   """ Generate a square wave on pin1 of DLP-IO8-G """
+
+   from time import perf_counter 
+   from serial import Serial
+
+   dlp = Serial(port='/dev/ttyUSB0', baudrate=115200)  # open serial port
+   # byte codes to control line 1:
+   ON1 = b'1'
+   OFF1 = b'Q'
+
+   # number of periods
+   NPERIODS = 1000
+
+   # Timing of the square wave
+   TIME_HIGH = 0.010   # 10ms pulse
+   TIME_LOW = 0.090    # send every 100ms
+   PERIOD = TIME_HIGH + TIME_LOW
+
+   onset_times = [ (PERIOD * i) for i in range(NPERIODS) ]
+
+   i = 0
+   while i < NPERIODS:
+       if i == 0:
+           t0 = perf_counter()
+
+       # wait until the start of the next period
+       while perf_counter() - t0 < onset_times[i]:
+           None
+           
+       dlp.write(ON1)
+       
+       # busy wait for 'TIME_HIGH' seconds. This should be more accurate than time.sleep(TIME_HIGH)
+       t1 = perf_counter()
+       while perf_counter() - t1 < (TIME_HIGH):
+           None
+           
+       dlp.write(OFF1)
+       i = i + 1
+       print(f"\r{i:4d}", end='')
+
+   time.sleep(TIME_LOW)
+   print()
+   print(f'{NPERIODS} periods of {PERIOD} seconds')
+   print('Total time-elapsed: ' + str(perf_counter() -t0))
+   dlp.close()         # close the port
+```
+
+Here is the result on an oscilloscope:
+
+![](triggers-100ms.png)
+      
+
+### Reading an input line
+
+```{python}
+   import time
+   import serial
+   import numpy as np
+   import matplotlib.pyplot as plt
+
+
+   dlp = serial.Serial(port='/dev/ttyUSB0', baudrate=115200)  # open serial port
+   print(dlp.name)         # check which port was really used
+   dlp.write(b'`')  # switch to ascii mode
+
+   N = 1000
+   o = np.zeros(N)  # will store timestamps when the input line is HIGH
+
+   i = 0
+   while i < N:
+      dlp.write(b'A')  # request to read
+      x = dlp.read(3).decode('utf-8')
+      if x[0] == '1':  # the line is HIGH
+         o[i] = time.perf_counter()
+         i += 1
+
+   plt.hist(np.diff(o) * 1000.0)  # plot the deltas between timestamps 
 
 ```
