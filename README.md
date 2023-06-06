@@ -3,13 +3,34 @@ Python code to control the DLP-IO8-G USB-to-TTL device.
 
 ![](dlp-io8-g-800.png)
 
-The DLP-IO8-G is a simple USB data acquisition module which permits to receive or send TTL signals on 8 lines using a very simple serial protocol  (Note that DLP design also manufactures modules with with 14 or 20 lines (see <http://www.dlpdesign.com/usb/>)
-
-**It works out of the box under Linux as the FTDI VCP driver is present in the Linux kernel**.
+The DLP-IO8-G is a simple USB data acquisition module which permits to receive or send TTL signals on 8 lines using a very simple serial protocol. It relies on the FTDI VCP driver which is present in the standard Linux kernel so that there is not need to install any driver: it works out of the box.
 
 From a software point of view, it appears as a serial device which can be controlled by writing and reading characters.
 
-Here is the list of commands:
+For example, the following Python code, switches all data lines to 0, then 1, then  0 again, with half second delays.
+
+```
+    from serial import Serial
+    from time import sleep
+    
+    dlp = Serial(port='/dev/ttyUSB0', baudrate=115200)  # open serial port
+
+    dlp.write(b'QWERTYUI')  # sets all lines to '0'
+    sleep(0.5)
+    dlp.write(b'12345678')  # sets all lines to '1'
+    sleep(0.5)
+    dlp.write(b'QWERTYUI')  # sets all lines back to '0'
+```    
+
+The following capture from a scope shows that, at the 115200 baudrate, the delay between the edges of the first and 8th line is less than 1msec. 
+
+![](scope_4lines_A.png)
+
+Note: DLP design also manufactures modules with with 14 or 20 lines (see <http://www.dlpdesign.com/usb/>)
+
+
+
+Here is the full list of commands:
 
 | ASCII |  Hex | Description           | Return                             |
 |-------|------|-----------------------|------------------------------------|
@@ -39,20 +60,20 @@ Here is the list of commands:
 | B     | 0x42 | Ch5  Analog In        |                                    |
 | O     | 0x4F | Ch5  Temperature      |                                    |
 | 6     | 0x36 | Ch6   Digital Out 1   |                                    |
-| Y     | 0x59 | Digital Out 0         |                                    |
-| H     | 0x48 | Digital In            |                                    |
-| N     | 0x4E | Analog In             |                                    |
-| P     | 0x50 | Temperature           |                                    |
-| 7     | 0x37 | Ch7    Digital Out 1  |                                    |
-| U     | 0x55 | Digital Out 0         |                                    |
-| J     | 0x4A | Digital In            |                                    |
-| M     | 0x4D | Analog In             |                                    |
-| [     | 0x5B | Temperature           |                                    |
+| Y     | 0x59 | Ch6 Digital Out 0     |                                    |
+| H     | 0x48 | Ch6 Digital In        |                                    |
+| N     | 0x4E | Ch6 Analog In         |                                    |
+| P     | 0x50 | Ch6 Temperature       |                                    |
+| 7     | 0x37 | Ch7 Digital Out 1     |                                    |
+| U     | 0x55 | Ch7 Digital Out 0     |                                    |
+| J     | 0x4A | Ch7 Digital In        |                                    |
+| M     | 0x4D | Ch7 Analog In         |                                    |
+| [     | 0x5B | Ch7 Temperature       |                                    |
 | 8     | 0x38 | Ch8     Digital Out 1 |                                    |
-| I     | 0x49 | Digital Out 0         |                                    |
-| K     | 0x4B | Digital In            |                                    |
-| ,     | 0x2C | Analog In             |                                    |
-| ]     | 0x5D | Temperature           |                                    |
+| I     | 0x49 | Ch8 Digital Out 0     |                                    |
+| K     | 0x4B | Ch8 Digital In        |                                    |
+| ,     | 0x2C | Ch8 Analog In         |                                    |
+| ]     | 0x5D | Ch8 Temperature       |                                    |
 | `     | 0x60 | set ASCII mode        |                                    |
 | \     | 0x5C | set BINARY mode       |                                    |
 | L     | 0x4C | set °F                |                                    |
@@ -68,7 +89,6 @@ A full description of the device is available at <http://www.ftdichip.com/Suppor
 To use it under Python, you need to install `pyserial`:
 
      pip install pyserial
-
 
 Under Linux, add yourself to the `tty` and `dialup` groups:
 
@@ -98,7 +118,6 @@ The last line tells you that the device is at `/dev/ttyUSB0`.
 
 ```python
 from serial import Serial
-
 dlp = Serial(port='/dev/ttyUSB0', baudrate=115200)  # open serial port
 
 dlp.write(b'QWERTYUI')  # set all lines to '0'
