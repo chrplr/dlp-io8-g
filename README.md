@@ -12,7 +12,7 @@ From a software point of view, it appears as a serial device which can be contro
 Here is the list of commands:
 
 | ASCII |  Hex | Description           | Return                             |
-|-------+------+-----------------------+------------------------------------|
+|-------|------|-----------------------|------------------------------------|
 | 1     | 0x31 | Ch1 Digital Out 1     |                                    |
 | Q     | 0x51 | Ch1 Digital Out 0     |                                    |
 | A     | 0x41 | Ch1 Digital In        | 0 or 1                             |
