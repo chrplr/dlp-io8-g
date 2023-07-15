@@ -33,7 +33,7 @@ Note: DLP design also manufactures modules with with 14 or 20 lines (see <http:/
 Here is the full list of commands:
 
 | ASCII |  Hex | Description       | Return                             |
-|-------+------+-------------------+------------------------------------|
+|-------|------|-------------------|------------------------------------|
 | 1     | 0x31 | Ch1 Digital Out 1 |                                    |
 | Q     | 0x51 | Ch1 Digital Out 0 |                                    |
 | A     | 0x41 | Ch1 Digital In    | 0 or 1                             |
