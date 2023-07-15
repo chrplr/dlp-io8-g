@@ -24,7 +24,7 @@ For example, the following Python code, switches all data lines to 0, then 1, th
 
 The following capture from a scope shows that, at the 115200 baudrate, the delay between the edges of the first and 8th line is less than 1msec. 
 
-![](scope_4lines_A.png)
+![](scope_4lines_A.jpg)
 
 Note: DLP design also manufactures modules with with 14 or 20 lines (see <http://www.dlpdesign.com/usb/>)
 
@@ -32,53 +32,53 @@ Note: DLP design also manufactures modules with with 14 or 20 lines (see <http:/
 
 Here is the full list of commands:
 
-| ASCII |  Hex | Description           | Return                             |
-|-------|------|-----------------------|------------------------------------|
-| 1     | 0x31 | Ch1 Digital Out 1     |                                    |
-| Q     | 0x51 | Ch1 Digital Out 0     |                                    |
-| A     | 0x41 | Ch1 Digital In        | 0 or 1                             |
-| Z     | 0x5A | Ch1 Analog In         | voltage                            |
-| 9     | 0x39 | Ch1 Temperature       |                                    |
-| 2     | 0x32 | Ch2 Digital Out 1     |                                    |
-| W     | 0x57 | Ch2 Digital Out 0     |                                    |
-| S     | 0x53 | Ch2 Digital In        |                                    |
-| X     | 0x58 | Ch2 Analog In         |                                    |
-| 0     | 0x30 | Ch2 Temperature       |                                    |
-| 3     | 0x33 | Ch3 Digital Out 1     |                                    |
-| E     | 0x45 | Ch3 Digital Out 0     |                                    |
-| D     | 0x44 | Ch3 Digital In        |                                    |
-| C     | 0x43 | Ch3 Analog In         |                                    |
-| -     | 0x2D | Ch3 Temperature       |                                    |
-| 4     | 0x34 | Ch4 Digital Out 1     |                                    |
-| R     | 0x52 | Ch4 Digital Out 0     |                                    |
-| F     | 0x46 | Ch4 Digital In        |                                    |
-| V     | 0x56 | Ch4 Analog In         |                                    |
-| =     | 0x3D | Ch4 Temperature       |                                    |
-| 5     | 0x35 | Ch5  Digital Out 1    |                                    |
-| T     | 0x54 | Ch5  Digital Out 0    |                                    |
-| G     | 0x47 | Ch5  Digital In       |                                    |
-| B     | 0x42 | Ch5  Analog In        |                                    |
-| O     | 0x4F | Ch5  Temperature      |                                    |
-| 6     | 0x36 | Ch6   Digital Out 1   |                                    |
-| Y     | 0x59 | Ch6 Digital Out 0     |                                    |
-| H     | 0x48 | Ch6 Digital In        |                                    |
-| N     | 0x4E | Ch6 Analog In         |                                    |
-| P     | 0x50 | Ch6 Temperature       |                                    |
-| 7     | 0x37 | Ch7 Digital Out 1     |                                    |
-| U     | 0x55 | Ch7 Digital Out 0     |                                    |
-| J     | 0x4A | Ch7 Digital In        |                                    |
-| M     | 0x4D | Ch7 Analog In         |                                    |
-| [     | 0x5B | Ch7 Temperature       |                                    |
-| 8     | 0x38 | Ch8     Digital Out 1 |                                    |
-| I     | 0x49 | Ch8 Digital Out 0     |                                    |
-| K     | 0x4B | Ch8 Digital In        |                                    |
-| ,     | 0x2C | Ch8 Analog In         |                                    |
-| ]     | 0x5D | Ch8 Temperature       |                                    |
-| `     | 0x60 | set ASCII mode        |                                    |
-| \     | 0x5C | set BINARY mode       |                                    |
-| L     | 0x4C | set °F                |                                    |
-| ;     | 0x3B | set °C                |                                    |
-| '     | 0x27 | Ping                  | Q (0x51) returned if DLP-IO8 is ok |
+| ASCII |  Hex | Description       | Return                             |
+|-------+------+-------------------+------------------------------------|
+| 1     | 0x31 | Ch1 Digital Out 1 |                                    |
+| Q     | 0x51 | Ch1 Digital Out 0 |                                    |
+| A     | 0x41 | Ch1 Digital In    | 0 or 1                             |
+| Z     | 0x5A | Ch1 Analog In     | voltage                            |
+| 9     | 0x39 | Ch1 Temperature   |                                    |
+| 2     | 0x32 | Ch2 Digital Out 1 |                                    |
+| W     | 0x57 | Ch2 Digital Out 0 |                                    |
+| S     | 0x53 | Ch2 Digital In    |                                    |
+| X     | 0x58 | Ch2 Analog In     |                                    |
+| 0     | 0x30 | Ch2 Temperature   |                                    |
+| 3     | 0x33 | Ch3 Digital Out 1 |                                    |
+| E     | 0x45 | Ch3 Digital Out 0 |                                    |
+| D     | 0x44 | Ch3 Digital In    |                                    |
+| C     | 0x43 | Ch3 Analog In     |                                    |
+| -     | 0x2D | Ch3 Temperature   |                                    |
+| 4     | 0x34 | Ch4 Digital Out 1 |                                    |
+| R     | 0x52 | Ch4 Digital Out 0 |                                    |
+| F     | 0x46 | Ch4 Digital In    |                                    |
+| V     | 0x56 | Ch4 Analog In     |                                    |
+| =     | 0x3D | Ch4 Temperature   |                                    |
+| 5     | 0x35 | Ch5 Digital Out 1 |                                    |
+| T     | 0x54 | Ch5 Digital Out 0 |                                    |
+| G     | 0x47 | Ch5 Digital In    |                                    |
+| B     | 0x42 | Ch5 Analog In     |                                    |
+| O     | 0x4F | Ch5 Temperature   |                                    |
+| 6     | 0x36 | Ch6 Digital Out 1 |                                    |
+| Y     | 0x59 | Ch6 Digital Out 0 |                                    |
+| H     | 0x48 | Ch6 Digital In    |                                    |
+| N     | 0x4E | Ch6 Analog In     |                                    |
+| P     | 0x50 | Ch6 Temperature   |                                    |
+| 7     | 0x37 | Ch7 Digital Out 1 |                                    |
+| U     | 0x55 | Ch7 Digital Out 0 |                                    |
+| J     | 0x4A | Ch7 Digital In    |                                    |
+| M     | 0x4D | Ch7 Analog In     |                                    |
+| [     | 0x5B | Ch7 Temperature   |                                    |
+| 8     | 0x38 | Ch8 Digital Out 1 |                                    |
+| I     | 0x49 | Ch8 Digital Out 0 |                                    |
+| K     | 0x4B | Ch8 Digital In    |                                    |
+| ,     | 0x2C | Ch8 Analog In     |                                    |
+| ]     | 0x5D | Ch8 Temperature   |                                    |
+| `     | 0x60 | set ASCII mode    |                                    |
+| \     | 0x5C | set BINARY mode   |                                    |
+| L     | 0x4C | set °F            |                                    |
+| ;     | 0x3B | set °C            |                                    |
+| '     | 0x27 | Ping              | Q (0x51) returned if DLP-IO8 is ok |
 
 
 
@@ -114,7 +114,7 @@ The last line tells you that the device is at `/dev/ttyUSB0`.
 
 ## Examples 
 
-### Simple test
+### Writing on lines 1 to 8
 
 ```python
 from serial import Serial
@@ -133,8 +133,32 @@ OFF1 = b'Q'
 OFF2 = b'W'
 OFF3 = b'E'
 OFF4 = b'R'
-dlp.write(OFF1 + ON2 + ON3 + ON4)
+dlp.write(OFF1 + OFF2 + OFF3 + OFF4)
 ```
+
+
+### Detecting changes on input line 1
+
+```python
+   import time
+   import serial
+
+   dlp = serial.Serial(port='/dev/ttyUSB0', baudrate=115200)  # open serial port
+   print(dlp.name)         # check which port was really used
+   dlp.write(b'`')  # switch to ascii mode
+
+   start = time.perf_counter()
+   previous_state = '2'
+
+   while True:
+      dlp.write(b'A')  # request to read line 1
+      state = dlp.read(3).decode('utf-8')
+      if state[0] != previous_state[0]:
+          print(time.perf_counter() - start, state[0])
+          previous_state = state
+
+```
+
 
 ### Sending pulses at regular intervals
 
@@ -193,31 +217,3 @@ Here is the result on an oscilloscope:
 
 ![](triggers-100ms.png)
       
-
-### Reading an input line
-
-```python
-   import time
-   import serial
-   import numpy as np
-   import matplotlib.pyplot as plt
-
-
-   dlp = serial.Serial(port='/dev/ttyUSB0', baudrate=115200)  # open serial port
-   print(dlp.name)         # check which port was really used
-   dlp.write(b'`')  # switch to ascii mode
-
-   N = 1000
-   o = np.zeros(N)  # will store timestamps when the input line is HIGH
-
-   i = 0
-   while i < N:
-      dlp.write(b'A')  # request to read
-      x = dlp.read(3).decode('utf-8')
-      if x[0] == '1':  # the line is HIGH
-         o[i] = time.perf_counter()
-         i += 1
-
-   plt.hist(np.diff(o) * 1000.0)  # plot the deltas between timestamps 
-
-```
