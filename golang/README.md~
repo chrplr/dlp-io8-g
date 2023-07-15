@@ -1,1 +1,0 @@
-./dlp-io8-demo -read_mode=false -port_name /dev/ttyUSB1
