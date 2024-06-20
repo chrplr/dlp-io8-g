@@ -1,4 +1,4 @@
-module dlp-io8
+module dlp
 
 go 1.20
 

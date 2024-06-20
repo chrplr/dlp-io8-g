@@ -1,0 +1,13 @@
+package main
+
+import (
+"fmt"
+"dlp-io8/dlp"
+)
+
+func main() {
+   d = new dlp.DLPio8g("/dev/ttyUSB0", 115200)
+   defer d.Close()
+
+   fmt.Println(d.Read())
+}

@@ -3,9 +3,19 @@ Python code to control the DLP-IO8-G USB-to-TTL device.
 
 ![](dlp-io8-g-800.png)
 
-The DLP-IO8-G is a simple USB data acquisition module which permits to receive or send TTL signals on 8 lines using a very simple serial protocol. It relies on the FTDI VCP driver which is present in the standard Linux kernel so that there is not need to install any driver: it works out of the box.
+The DLP-IO8-G is a simple USB data acquisition module which permits to receive or send TTL signals on 8 lines using a very simple serial protocol. It relies on the FTDI VCP driver which is present in the standard Linux kernel so that there is usually not need to install any driver.
 
-From a software point of view, it appears as a serial device which can be controlled by writing and reading characters.
+Run `sudo dmesg -w` in a terminal and plug the device. You should line a line like:
+
+    FTDI USB Serial Device converter now attached to ttyUSB0
+
+If not, enter:
+
+    sudo modprobe ftdi_sio
+
+and replug the device.
+
+From a software point of view, it appears as a serial device which can be controlled by writing and reading characters. The address of the port is the one written in the `dmesg` output, in my case `/dev/ttyUSB0`
 
 For example, the following Python code, switches all data lines to 0, then 1, then  0 again, with half second delays.
 

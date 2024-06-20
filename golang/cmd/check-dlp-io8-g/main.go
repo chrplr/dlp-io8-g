@@ -5,12 +5,13 @@ package main
 import (
 	"flag"
 	"fmt"
-	"go.bug.st/serial"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"go.bug.st/serial"
 )
 
 var start int64 // will store unix.nanotime at start
@@ -28,18 +29,29 @@ func listSerialPorts() {
 	}
 }
 
-func openDLPIO8(device string, baudrate int) serial.Port {
+func openDLPIO8(device string, baudrate int) (serial.Port, error) {
 	mode := &serial.Mode{
 		BaudRate: baudrate,
 		Parity:   serial.EvenParity,
-		DataBits: 7,
+		DataBits: 8,
 		StopBits: serial.OneStopBit,
 	}
 	port, err := serial.Open(device, mode)
 	if err != nil {
 		log.Fatal(err)
 	}
-	return port
+
+	port.SetReadTimeout((1 * time.Second))
+
+	port.Write([]byte("'"))
+	buff := make([]byte, 8)
+	_, err = port.Read(buff)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println("ping: ", string(buff))
+
+	return port, nil
 }
 
 func writeDLPIO8(port serial.Port, cmd string) {
@@ -59,12 +71,12 @@ func sendTest(port serial.Port) {
 		writeDLPIO8(port, "QWERTYUI")
 		fmt.Printf("OFF %dms\n", elapsedTime())
 
-		time.Sleep(1 * time.Second)
+		time.Sleep(5 * time.Second)
 
 		writeDLPIO8(port, "12345678")
 		fmt.Printf("ON %dms\n", elapsedTime())
 
-		time.Sleep(1 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -81,15 +93,15 @@ func receiveTest(port serial.Port) {
 
 			fmt.Println("Writing " + string(chr))
 			writeDLPIO8(port, string(chr))
-			
+
 			n, err := port.Read(buff)
 			if err != nil {
 				log.Fatal(err)
 				break
 			}
-			
-			fmt.Printf("time %v: line %d=%v  (%d bytes returned)\n", elapsedTime(), i + 1, string(buff[:n]), n)
-			
+
+			fmt.Printf("time %v: line %d=%v  (%d bytes returned)\n", elapsedTime(), i+1, string(buff[:n]), n)
+
 		}
 	}
 }
@@ -113,7 +125,10 @@ func main() {
 		return
 	}
 
-	port := openDLPIO8(portName, baudRate)
+	port, err := openDLPIO8(portName, baudRate)
+	if err != nil {
+		log.Fatalln(err)
+	}
 	defer port.Close()
 
 	// Gracefully handles receiving Ctrl-C
@@ -129,6 +144,7 @@ func main() {
 		os.Exit(1)
 	}()
 
+	time.Sleep(time.Second)
 	start = time.Now().UnixNano()
 
 	if readMode {
