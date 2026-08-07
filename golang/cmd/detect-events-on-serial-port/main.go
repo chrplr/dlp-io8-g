@@ -102,8 +102,11 @@ func main() {
 
 	pingDLP_IO8_G(port)
 
-	// Gracefully handles receiving Ctrl-C
-	c := make(chan os.Signal)
+	// Gracefully handles receiving Ctrl-C.
+	// Buffered: signal.Notify never blocks, so a signal arriving before the
+	// goroutine below is ready to receive would be dropped on an unbuffered
+	// channel and Ctrl-C would do nothing.
+	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
