@@ -263,20 +263,42 @@ round-trip time is measurable to arbitrary precision, one-way delay is not
 derivable from it without a synchronised clock or independent knowledge of the
 asymmetry. It is why NTP assumes symmetry rather than measuring it.
 
-In the specific case of a self-loopback it is worse than underdetermined: the
-outbound latency **cancels**, because the trigger command and the polling command
-travel the same path and whatever delays one delays the other. Measured on this
-device at `latency_timer=1`:
+### What a round trip does tell you
+
+It gives an **upper bound**, and that is worth having. Since `R = out + in` and
+neither term can be negative, each is at most `R`. Take the smallest round trip
+observed, not the median — that is the tightest the data supports:
+
+| `latency_timer` | best round trip | so outbound latency is at most |
+|---|---|---|
+| 1 ms | 0.793 ms | **0.793 ms** |
+| 16 ms | 15.396 ms | 15.396 ms |
+
+Note what sets the tightness: the *return* path. At the driver's default the
+bound is 15 ms and tells you essentially nothing. Lowering the latency timer
+does not just speed up polling — it sharpens what you can conclude about the
+outbound path, which is a second and less obvious reason to set it.
+
+What a round trip cannot do is give you the outbound latency itself, or separate
+it from the return.
+
+### Comparing round trips does not help either
+
+The obvious next move is to compare a loopback against a bare poll and attribute
+the difference to the outbound path. It does not work: both commands travel the
+same path, so a delay common to them appears in both measurements and cancels in
+the subtraction. Measured at `latency_timer=1`:
 
 | | median round trip |
 |---|---|
 | bare poll (ask the device a question) | 0.997 ms |
 | loopback (raise a line, poll until it reads high) | 0.996 ms |
 
-Adding the entire outbound trigger to the loop cost **−0.001 ms**. There is no
-information about the outbound path in that number.
+Adding the entire outbound trigger to the loop changed the result by
+**−0.001 ms**. The difference carries no information about the outbound path —
+though, as above, the loopback figure itself still bounds it.
 
-### What can be recovered, without any instrument
+### A tighter bound, without any instrument
 
 Vary the return path by a *known* amount and extrapolate. The FTDI latency timer
 does exactly that, and across 1, 2, 4, 8 and 16 ms:
@@ -287,15 +309,24 @@ does exactly that, and across 1, 2, 4, 8 and 16 ms:
 Slope essentially exactly 1, and **both intercepts within a few microseconds of
 zero**. Extrapolating the FTDI batching to nothing, everything else in the loop —
 outbound dispatch, device processing, input detection — sums to under ~10 µs.
-Since none of those can be negative, that **bounds the outbound latency at a few
-tens of microseconds**, not the ~1 ms that "USB frames are 1 ms" would suggest.
-Bulk OUT transfers evidently go out within the current frame rather than waiting
-for the next.
+Since none of those can be negative, that **puts the outbound latency in the tens
+of microseconds** — about thirty times tighter than the 0.793 ms above, and not
+the ~1 ms that "USB frames are 1 ms" would suggest. Bulk OUT transfers evidently
+go out within the current frame rather than waiting for the next.
 
-It is a bound, not a measurement: it assumes the return path is exactly the timer
-with no constant term. But it is much tighter than "unknown", and it is
-consistent with the head-to-head against a NeuroSpin MEG TTL box, which put the
-two devices within 38 µs of each other.
+This is a stronger claim than the plain bound and rests on an assumption the
+plain bound does not: that the return path is exactly the timer with no constant
+term. So there are three statements available, in decreasing order of certainty
+and increasing order of precision:
+
+| claim | rests on |
+|---|---|
+| outbound latency ≤ 0.793 ms | arithmetic, no assumptions |
+| outbound latency ≈ tens of µs | the extrapolation above |
+| outbound latency = *x* | not available without a zero-latency host reference |
+
+The middle figure is consistent with the head-to-head against a NeuroSpin MEG
+TTL box, which put the two devices within 38 µs of each other.
 
 ### Measuring it properly
 
