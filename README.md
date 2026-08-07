@@ -36,11 +36,10 @@ sampler](#do-not-send-multi-bit-codes-to-a-fast-sampler) below.
 
 ![](scope_4lines_A.jpg)
 
-*(This capture was long cited here as showing "less than 1 ms". It does bound the
-skew, but it cannot measure it: the timebase is 1.00 ms/div, so the whole screen
-is 10 ms and the per-byte effect is ~87 µs — under a tenth of a division. The
-610 µs figure comes from a later measurement at 200 µs/div with per-edge
-readout; see [`measurements/`](measurements/).)*
+*(This capture bounds the skew but cannot measure it: at 1.00 ms/div the whole
+screen is 10 ms while the per-byte effect is ~87 µs, under a tenth of a division.
+The 610 µs figure comes from a measurement at 200 µs/div with per-edge readout;
+see [`measurements/`](measurements/).)*
 
 Note: DLP design also manufactures modules with with 14 or 20 lines (see <http://www.dlpdesign.com/usb/>)
 
