@@ -12,6 +12,8 @@ Host: `is158520`, Linux, `ftdi_sio` VCP driver. Session 2026-08-07.
 ./dlp_timing.py discard  --out <dir>                     # ch1 -> ch8 jumper
 ./dlp_timing.py skew     --out <dir> --probe-map 2,3,4   # scope on 4 channels
 ./dlp_timing.py pulse    --out <dir> --condition idle    # scope on ch1
+./dlp_timing.py pulse-stream --device ttlbox --trials 1000 --out <dir>  # AD3
+./dlp_timing.py h2h-stream   --trials 2000 --out <dir>                  # AD3
 ./dlp_timing.py <block> --help
 ```
 
@@ -20,10 +22,30 @@ board so the ground is already common. Remove that jumper before probing ch8
 with the scope, or ch1 and ch8 are shorted and their skew reads zero for a
 wiring reason.
 
-The scope blocks were run with a Siglent SDS1104X-E over LAN. It ships on
-10.11.13.0/24 and does not fall back to link-local, so a direct cable needs the
-host on that subnet (`sudo ip addr add 10.11.13.1/24 dev <iface>`). Probes at
-1x, not 10x: this is a 0-5 V logic signal.
+## Two instruments
+
+The `skew`, `pulse` and `headtohead` blocks were run with a **Siglent
+SDS1104X-E** over LAN. It ships on 10.11.13.0/24 and does not fall back to
+link-local, so a direct cable needs the host on that subnet (`sudo ip addr add
+10.11.13.1/24 dev <iface>`). Probes at 1x, not 10x: this is a 0-5 V logic signal.
+
+The `*-stream` blocks were run with a **Digilent Analog Discovery 3** through the
+WaveForms SDK. The difference is not resolution but sample size: a scope driven
+over SCPI costs about a second and a half per armed acquisition, which caps a
+sitting at n≈100, while the AD3 records continuously to host memory and a single
+82-second capture holds n=2000. Use the **analog** inputs for 5 V logic — the 16
+digital channels are 3.3 V.
+
+Two things bound how fast a streaming capture can safely run, and only the first
+is obvious. The device sends `rate x channels x 2` bytes per second and the host
+must absorb all of it; but the draining loop also does its own work per
+iteration, and if that work allocates, the interpreter is doing memory
+management inside the window where the on-board buffer is filling. Captures at
+1 MS/s lost a buffer even at real-time priority, where scheduling cannot be the
+cause. `ad3.py` preallocates its output for that reason, and the streaming blocks
+default to 250 kS/s. Every block aborts rather than writing a file if the SDK
+reports any lost or corrupted samples: a capture with holes has them wherever the
+host was busiest, which is exactly where the interesting trials are.
 
 ---
 
@@ -244,87 +266,173 @@ unrelated devices, the same host, the same answer.
 Both devices driven from one host loop, both edges captured in one scope
 acquisition. Wiring: TTL box D30 on CH1, DLP ch1 on CH2, common ground.
 
-### Write latency: indistinguishable
+### Write latency: the difference is not resolved, and here is why
 
 Writing to A then B and measuring the edge gap includes the host's own gap
-between the two writes, which is unknown. Running both orders removes it:
+between the two writes, which is unknown. Running both orders looks like it
+removes it:
 
-    delta(A then B) = lat_B - lat_A + gap
-    delta(B then A) = lat_A - lat_B + gap
+    delta(A then B) = w_A + lat_B - lat_A
+    delta(B then A) = w_B + lat_A - lat_B
 
-so half their difference is the latency difference, whatever the gap was.
-n=98 and 99, single-shot acquisitions, idle host at normal priority:
+where `w` is how long the first `write()` call takes to return, since that is
+when the second one starts. Half the difference is the latency difference plus
+`(w_A - w_B)/2` — so the method works only if the two write calls cost the same,
+or if each cost is a fixed property of its device and can be measured and
+subtracted.
 
-| arm | p50 | p95 | max |
-|---|---|---|---|
-| TTL box written first | 128.81 µs | 200.63 | 463.91 |
-| DLP written first | 51.90 µs | 72.27 | 127.27 |
+**Neither holds.** Timing both calls per trial inside a streaming capture
+(n=1631 pairs, 250 kS/s, idle host):
 
-**DLP write latency minus TTL box write latency: +38 µs.** Against a ~1 ms USB
-frame that is nothing: for getting a single trigger onto a wire, the two cannot
-be told apart, and the choice between them must be made on something else.
+| write call | issued first | issued second |
+|---|---|---|
+| DLP (`serial.write`, 1 byte, `ftdi_sio`) | 40.84 µs | **14.13 µs** |
+| MEG TTL box (`serial.write`, 2 bytes, `cdc_acm`) | 72.34 µs | 68.26 µs |
 
-Two notes on the method. Both arms' minima are comfortably positive (16.2 and
-12.0 µs), so no trial had the second edge arrive before the trigger — the
-scope triggers on the first-written channel, so a distribution straddling zero
-would have been silently truncated and the answer quietly wrong. And half the
-*sum* of the medians is a by-product worth having: about **90 µs** for the host
-to write to two different serial devices back to back.
+The same one-byte DLP write costs 41 µs going first and 14 µs going second. The
+box is position-independent; the DLP is not, so the residual does not cancel and
+is not a constant that can be subtracted. It is also larger than the quantity
+being estimated.
 
-The spreads differ nearly fourfold between arms, which cannot be the devices —
-each arm contains both of their latencies. It is the host's write path, which
-differs by order: the TTL box is `cdc_acm` on ttyACM, the DLP is `ftdi_sio` on
-ttyUSB. Recorded as an observation, not explained.
+The two arms then disagree about a number whose two estimates must sum to zero.
+Treating the edge as a fixed offset from the start of the write call gives
+−5.5 µs from one arm and −45.8 µs from the other; anchoring instead to the call's
+*return* narrows the inconsistency to 10.9 µs but does not close it. Underneath
+both sits USB microframe scheduling at 125 µs granularity, which is coarser than
+the effect.
+
+So the honest statement is: **the DLP-to-TTL-box write latency difference is of
+order tens of microseconds, and neither its sign nor its magnitude is
+established by this method.** Both arms do agree it is small against the box's
+own ~1.5 ms absolute latency, which is the part that matters — for putting a
+single trigger on a wire the two are interchangeable, and the choice between them
+must be made on the pulse-width and skew behaviour below, which differ by
+hundreds of times more.
+
+Measuring it properly needs what the [main README](../README.md#measuring-it-properly)
+describes: an event the host can produce at a time it knows exactly, on the same
+instrument. Two devices behind two independent USB stacks cannot be separated by
+a better estimator.
 
 ### Pulse width: the real difference, and it is not speed
 
-Same measurement on both devices — scope-measured realised width, n=50 per
-width — under three host conditions. The DLP's width is the interval between
-two host writes; the TTL box's is timed by its firmware from a single command.
+Same measurement on both devices — the realised width on the wire. The DLP's
+width is the interval between two host writes; the TTL box's is timed by its
+firmware from a single command. **n=1000 per width**, streamed from the AD3 at
+100 kS/s.
 
-**TTL box (firmware-timed), spread in ms:**
+**Realised width, spread in ms:**
 
-| condition | 5 ms | 10 ms | 20 ms | 50 ms |
+| device / condition | 1 ms | 2 ms | 5 ms | 10 ms | 20 ms | 50 ms |
+|---|---|---|---|---|---|---|
+| TTL box, idle | 1.03 | 2.01 | 2.05 | 2.05 | 2.04 | 2.04 |
+| DLP, idle | 0.15 | 0.13 | 0.14 | 0.30 | 0.13 | 0.13 |
+| DLP, load + `chrt -f 50` | 0.13 | 0.14 | 0.13 | 0.13 | 0.14 | 0.15 |
+
+The DLP's median error is **+24 to +30 µs idle** and **+33 to +47 µs** under full
+CPU load at real-time priority — the load costs it about 15 µs and nothing else.
+
+The row that is missing is the DLP under load at *normal* priority, and it is
+missing for a reason worth recording: under `stress-ng --cpu 0` at
+`SCHED_OTHER`, the host cannot drain the instrument either. That capture lost
+131,064 samples and corrupted 19 million more, against zero for the same run
+under `chrt -f 50`. It was measured on the scope instead, n=50, and it is the
+whole argument for real-time priority:
+
+| DLP, under CPU load, normal priority | 5 ms | 10 ms | 20 ms | 50 ms |
 |---|---|---|---|---|
-| idle | 1.96 | 2.00 | 2.01 | 1.93 |
-| under CPU load | 1.55 | 2.01 | 1.96 | 1.95 |
-| load + `chrt -f 50` | 1.92 | 1.93 | 1.90 | 1.92 |
-
-**DLP-IO8 (host-timed), spread in ms:**
-
-| condition | 5 ms | 10 ms | 20 ms | 50 ms |
-|---|---|---|---|---|
-| idle | 0.05 | 0.11 | 0.06 | 0.12 |
-| under CPU load | **4.75** | **3.01** | **1.80** | **2.58** |
-| load + `chrt -f 50` | 0.12 | 0.07 | 0.11 | 0.11 |
-
-Twelve numbers for the TTL box, all 1.9–2.0 ms, unmoved by CPU load and unmoved
-by real-time priority. The host is genuinely not in that loop.
+| spread | **4.75** | **3.01** | **1.80** | **2.58** |
 
 Neither device is simply better:
 
-* **Configured correctly the DLP is about 16× more precise** — 0.11 ms against
-  1.93 ms — because the TTL box pays a fixed `millis()` truncation the DLP does
-  not.
-* **Configured carelessly the DLP is about 40× worse**, and the TTL box does not
+* **Configured correctly the DLP is about 15× more precise** — 0.13 ms against
+  2.04 ms — because the TTL box pays a timebase cost the DLP does not.
+* **Configured carelessly the DLP is about 35× worse**, and the TTL box does not
   notice.
 
 So the TTL box offers roughly 2 ms of width uncertainty that cannot be improved,
-and the DLP offers 0.1 ms *if* real-time priority is set up and 4 ms if it is
+and the DLP offers 0.13 ms *if* real-time priority is set up and 4.75 ms if it is
 not. One is a property of the device; the other is a property of the system
 administration. Which is preferable depends on whether the machine's
 configuration is under your control and will stay that way.
 
-### An anomaly, stated rather than explained
+**One disagreement between the instruments, unresolved.** On the DLP's idle
+median error the scope (n=50) gives −10 to −20 µs and the AD3 (n=1000) gives +24
+to +30 µs: the same quantity, one instrument each, about 45 µs and a sign apart.
+Both are far inside the 0.13 ms spread, so no conclusion above depends on it, but
+neither figure should be quoted as *the* bias until the discrepancy is
+understood.
 
-The TTL box's spread is ~1.9 ms where `millis()` truncation alone predicts
-~1.0 ms — a realised width uniform on [w−1, w]. About a millisecond is
-unaccounted for, and it is constant across every width and every condition, so
-it is not load. The likely explanation is that the pulse *onset* also falls at
-an arbitrary point within a `millis()` tick, adding a second independent ±1 ms;
-two uniform milliseconds combine to a ~2 ms range. That is a hypothesis fitted
-to the observation, not a measurement, and it should be tested before being
-repeated as fact.
+### Why the TTL box's width spans 2 ms and not 1
+
+`millis()` truncates, so the obvious model of a firmware-timed pulse says the
+realised width is uniform on [w−1, w]: a flat histogram exactly 1 ms wide. The
+measured spread is twice that, and the reason is that **`millis()` does not tick
+at 1 ms.**
+
+Timer0 on a 16 MHz AVR overflows every 1024 µs, and `wiring.c` carries a
+fractional accumulator (`FRACT_INC` 3, `FRACT_MAX` 125) that adds a catch-up
+millisecond every ~41.7 overflows, keeping the clock right on average at the
+price of advancing by 2 about one time in 42. So the number of overflows needed
+to reach `millis() + w` depends on the accumulator's phase when the pulse
+started: for some phases *n* suffice, for the rest it takes *n+1*. Each case
+gives a uniform band 1024 µs wide, and the realised width is a mixture of two
+of them — **2.048 ms across**.
+
+`analyse-pulse-stream.py` simulates this. It has **no free parameters**:
+everything in it is fixed by `wiring.c` and the 16 MHz clock, so the comparison
+is a test rather than a fit. Measured against modelled, n=1000 per width:
+
+| requested | measured spread | model | trials in the early band (measured / model) |
+|---|---|---|---|
+| 1 ms | 1.025 | 1.024 | — |
+| 2 ms | 2.009 | 2.048 | 2.0% / 2.4% |
+| 5 ms | 2.050 | 2.048 | 8.6% / 9.6% |
+| 10 ms | 2.049 | 2.048 | 20.9% / 21.5% |
+| 20 ms | 2.041 | 2.048 | 43.7% / 45.6% |
+| 50 ms | 2.043 | 2.048 | 14.2% / 15.1% |
+
+The band split is the discriminating test: it swings from 2% to 44% and back to
+14% across widths, non-monotonically, and the model predicts each value to about
+a percentage point.
+
+A two-sample Kolmogorov-Smirnov test against the simulation passes at four of the
+six widths outright and at all six once a single scalar offset is removed
+(D = 0.015–0.033 against a 0.043 critical value), so what it rejects is a shift,
+not a shape. That offset is itself informative: fitting it across widths gives
+
+    offset = +17.6 us + 905 ppm x width
+
+The constant is the firmware's own gap between raising the line and reading
+`millis()`, plus one loop pass to notice the end. The 905 ppm is the Mega's
+ceramic resonator running slow against the AD3's timebase — well inside its
+±5000 ppm specification, and not something a firmware change can remove.
+
+**For an experimenter the practical statement is: a requested *w* ms pulse from
+this box lands in (w−2.05, w+0.04] ms.** The `[w−1, w]` model understates the
+spread by a factor of two.
+
+### An output port that failed silently
+
+During this session the TTL box's output port stopped working mid-run, after
+roughly 19,000 pulses. It is recorded here because of *how* it failed:
+
+- `get_info` kept answering normally — version 1, caps 0x03.
+- A static `set_port(0x01)`, which does not involve the pulse machinery,
+  produced nothing. Neither did `set_port(0xFF)`: the whole port was dead.
+- A DTR reset into the bootloader did **not** recover it.
+- Unplugging and replugging USB did, completely and immediately.
+
+Only removing power cleared it, which is the signature of I/O latch-up rather
+than firmware state or permanent damage. The cause is not known; nothing was
+connected to the line but a high-impedance instrument input.
+
+The operational point stands regardless of cause: **a health check that only
+talks to the box over serial reports a perfectly healthy device while no
+triggers whatsoever reach the amplifier.** In a recording session that is a full
+data set with no usable event markers, discovered afterwards. A check that
+observes the line electrically — the box's own D30 → D22 loopback, where it
+fails to see its own edge — is the one that catches this.
 
 ## A note on the file schemas
 
@@ -332,6 +440,15 @@ repeated as fact.
 so lack it; `pulse-ttlbox-*.csv` and everything later carry it. The DLP files
 were renamed rather than re-recorded, since the measurement itself is unchanged
 and instrument time is better spent on things not yet measured.
+
+`h2h-stream-{idle,rt}.csv` carry `condition,policy,priority,arm,delta_us` and
+**cannot be corrected for the write-call asymmetry** described above, because
+they predate the per-trial `first_write_us`/`second_write_us` columns the
+correction needs. They are the raw edge separations, which are real; the latency
+difference is not recoverable from them. The block now records both write
+durations and assigns the arm from the recorded firing order rather than from
+which edge rose first — the two agree only while the host gap exceeds the
+latency difference, and the trials where it does not are exactly the tail.
 
 ## Not measured
 
@@ -346,8 +463,15 @@ and instrument time is better spent on things not yet measured.
   anchor "when the host asked" to "when the edge happened". It needs a reference
   device of known latency. The constant part can be calibrated out by an
   experiment in any case; the variable part is what the `pulse` block measures.
-- **Head-to-head against the NeuroSpin MEG TTL box**, whose latency is measured,
-  which would convert the relative numbers here into absolute ones.
+- **The write-latency difference between the two devices.** Attempted twice, on
+  two instruments, and not resolved either time — the order-reversal estimator
+  rests on an assumption the data falsifies. See [Write latency](#write-latency-the-difference-is-not-resolved-and-here-is-why).
+  Bounded, not measured: of order tens of microseconds.
+- **The DLP's idle pulse-width bias, to better than ~45 µs.** The scope and the
+  AD3 disagree on its sign. Both agree it is far smaller than the spread.
+- **The DLP under CPU load at normal priority, at large n.** The AD3 cannot be
+  driven at all in that condition, so the only data for it is the n=50 scope
+  measurement above.
 - **The shortest detectable input.** Attempted and withdrawn — see below.
 
 ## A block that was withdrawn

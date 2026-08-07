@@ -19,12 +19,15 @@ oscilloscope or a Black Box ToolKit; see README.md in this directory.
 
 import argparse
 import csv
+import random
 import os
 import statistics as st
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import numpy as np  # noqa: E402
+
 from dlpio8 import DLPIO8, CHANNELS  # noqa: E402
 
 
@@ -685,6 +688,309 @@ def block_headtohead(args):
             print(f"\n  wrote {rec.path}")
 
 
+def block_h2h_stream(args):
+    """Head-to-head against the MEG TTL box, streamed from an Analog Discovery 3.
+
+    Same comparison as the `headtohead` block and the same arithmetic, but the
+    instrument records continuously instead of being armed once per trial. That
+    removes the ~1.5 s of SCPI round trips each trial cost on the bench scope,
+    so a run yields thousands of trials rather than a hundred -- which is what
+    the tail needs.
+
+    Two things improve beyond sample size.
+
+    The arms ALTERNATE trial by trial rather than running in sequence. Both
+    therefore see the same host state, the same thermal conditions and the same
+    background load; on the scope they ran minutes apart and any drift between
+    them landed straight in the difference.
+
+    And the arm is identified from the data, not from a counter. Whichever line
+    rose first is the one that was written first, so a trial the instrument
+    missed cannot silently shift every later trial into the wrong arm.
+
+    Wiring: DLP ch1 on AD3 channel 1, TTL box D30 on channel 2, common ground.
+    Use the ANALOG inputs -- the digital ones are 3.3 V and these are 5 V lines.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from ad3 import AD3, rising_edges
+
+    from ttlbox_min import TTLBoxMin
+
+    policy, prio = scheduling_now()
+    print(f"  scheduling     {policy} priority {prio}")
+    if args.condition == "rt" and policy not in ("SCHED_FIFO", "SCHED_RR"):
+        sys.exit(f"--condition rt but this process is {policy}. Run under chrt.")
+
+    isi_lo, isi_hi = args.isi / 1000, (args.isi + args.jitter) / 1000
+    duration = args.trials * (isi_lo + isi_hi) / 2 + 2.0
+
+    with DLPIO8(port=args.port) as dlp, TTLBoxMin() as box, AD3(rate=args.rate) as ad3:
+        print(f"  ttlbox         firmware v{box.version}, caps 0x{box.caps:02X}")
+        print(f"  AD3            {args.rate/1e6:.1f} MS/s, ~{duration:.0f} s for "
+              f"{args.trials} trials\n")
+        box.set_port(0x00)
+        dlp.low(args.out_ch)
+        time.sleep(0.1)
+
+        state = {"trial": 0, "next_fire": 0.5, "clear_at": None, "fires": []}
+
+        def on_tick(t):
+            # Fired from inside the drain loop: no thread, so nothing can
+            # preempt the reader and lose samples.
+            if state["clear_at"] is not None and t >= state["clear_at"]:
+                box.set_port(0x00)
+                dlp.low(args.out_ch)
+                state["clear_at"] = None
+                state["next_fire"] = t + random.uniform(isi_lo, isi_hi)
+                return
+            if state["clear_at"] is None and t >= state["next_fire"] \
+                    and state["trial"] < args.trials:
+                # The duration of the FIRST write is the host gap the
+                # second one inherits, and it is recorded per trial because the
+                # estimator below needs it: it does not cancel.
+                if state["trial"] % 2 == 0:      # box first
+                    arm = "box-first"
+                    a = time.perf_counter()
+                    box.set_port(0x01)
+                    b = time.perf_counter()
+                    dlp.high(args.out_ch)
+                    c = time.perf_counter()
+                else:                            # dlp first
+                    arm = "dlp-first"
+                    a = time.perf_counter()
+                    dlp.high(args.out_ch)
+                    b = time.perf_counter()
+                    box.set_port(0x01)
+                    c = time.perf_counter()
+                state["fires"].append((arm, (b - a) * 1e6, (c - b) * 1e6))
+                state["trial"] += 1
+                state["clear_at"] = t + 0.010
+
+        data, stats = ad3.record(duration, on_tick=on_tick)
+        box.set_port(0x00)
+        dlp.low(args.out_ch)
+
+    print(f"  captured {stats['samples']} samples in {stats['seconds']:.1f} s, "
+          f"lost {stats['lost']}, corrupted {stats['corrupted']}")
+    if stats["lost"] or stats["corrupted"]:
+        sys.exit(f"  {stats['lost']} lost, {stats['corrupted']} corrupted: the "
+                 "capture has holes in it and the result would be built on "
+                 "whatever survived. Lower --rate and re-run.")
+
+    t_dlp = rising_edges(data[0], args.rate)
+    t_box = rising_edges(data[1], args.rate)
+    print(f"  edges: {len(t_dlp)} on the DLP, {len(t_box)} on the TTL box, "
+          f"{state['trial']} trials fired")
+
+    # Pair each DLP edge with the nearest TTL box edge. The ISI is tens of ms
+    # and the pair separation tens of us, so the nearest match is unambiguous.
+    #
+    # The arm comes from the recorded firing order, not from which edge rose
+    # first. Those are the same thing only while the host gap exceeds the
+    # latency difference, and on the trials where it does not -- the tail, which
+    # is the interesting part -- inferring the arm from the sign files the trial
+    # under the wrong arm and pulls the two medians toward each other.
+    pairs, unpaired = [], 0
+    for t in t_dlp:
+        if len(t_box) == 0:
+            break
+        j = int(np.argmin(np.abs(t_box - t)))
+        d = (t_box[j] - t) * 1e6          # us; sign says which rose first
+        if abs(d) > args.pair_window:
+            unpaired += 1
+            continue
+        pairs.append((min(t, t_box[j]), d))
+    pairs.sort()
+
+    fires = state["fires"]
+    if len(pairs) != len(fires):
+        print(f"  {len(pairs)} edge pairs against {len(fires)} trials fired; "
+              f"using the first {min(len(pairs), len(fires))} in order")
+    n = min(len(pairs), len(fires))
+
+    by_arm = {"dlp-first": [], "box-first": []}
+    gap_by_arm = {"dlp-first": [], "box-first": []}
+    with Recorder(args.out, f"h2h-stream-{args.condition}",
+                  ["condition", "policy", "priority", "arm", "trial",
+                   "delta_us", "first_write_us", "second_write_us"]) as rec:
+        for i in range(n):
+            _, d = pairs[i]
+            arm, w, w2 = fires[i]
+            # Signed so that a positive delta always means "the device written
+            # second rose second", whichever device that was.
+            signed = d if arm == "dlp-first" else -d
+            by_arm[arm].append(signed)
+            gap_by_arm[arm].append(w)
+            rec.row(args.condition, policy, prio, arm, i, signed, w, w2)
+
+        for name in ("dlp-first", "box-first"):
+            print(f"\n  {name}  {describe(by_arm[name], 'us')}")
+            print(f"    first write took {describe(gap_by_arm[name], 'us')}")
+        if unpaired:
+            print(f"  {unpaired} edges had no partner within "
+                  f"{args.pair_window:.0f} us")
+
+        if by_arm["dlp-first"] and by_arm["box-first"]:
+            d1 = quantile(sorted(by_arm["dlp-first"]), .5)
+            d2 = quantile(sorted(by_arm["box-first"]), .5)
+            wd = quantile(sorted(gap_by_arm["dlp-first"]), .5)
+            wb = quantile(sorted(gap_by_arm["box-first"]), .5)
+
+            # delta(dlp first) = w_D + L_B - L_D
+            # delta(box first) = w_B + L_D - L_B
+            # so the half difference carries (w_D - w_B)/2 with it, and only
+            # measuring both write calls removes it.
+            raw = (d2 - d1) / 2
+            corrected = raw + (wd - wb) / 2
+            print(f"\n  DLP minus TTL box, uncorrected:  {raw:+.2f} us")
+            print(f"  bias from unequal write calls:   {(wd - wb) / 2:+.2f} us"
+                  f"   (DLP {wd:.2f} us, box {wb:.2f} us)")
+            print(f"  => DLP write latency minus TTL box write latency: "
+                  f"{corrected:+.2f} us")
+
+            # Internal check: the model says the mean of the two arms' deltas
+            # is the mean of the two write durations. If the host's own numbers
+            # disagree with the edges, the model does not describe the setup and
+            # neither figure above should be believed.
+            implied = (d1 + d2) / 2
+            measured = (wd + wb) / 2
+            print(f"\n  consistency: edges imply a mean gap of {implied:.2f} us, "
+                  f"the host measured {measured:.2f} us"
+                  f"  ({implied - measured:+.2f} us)")
+        print(f"\n  wrote {rec.path}")
+
+
+def block_pulse_stream(args):
+    """Pulse width at large n, streamed from an Analog Discovery 3.
+
+    Same quantity as the `pulse` block -- the realised width of a pulse the host
+    asked for -- but recorded continuously rather than one armed acquisition per
+    trial, so a run yields thousands of trials instead of fifty.
+
+    # The sample rate is bounded by the busy-wait, not by resolution
+
+    A DLP pulse is two host writes with a busy-wait between them, and that wait
+    happens inside the loop draining the instrument. The device buffers 16384
+    samples, so the slack is 16384/rate seconds: 16 ms at 1 MS/s, which a 50 ms
+    pulse would blow straight through, losing samples exactly where the falling
+    edge is. At 100 kS/s the slack is 164 ms and the resolution is still 10 us
+    -- twenty-five times finer than a BBTK and far finer than the millisecond
+    effects being measured. Raising --rate is only safe if the widths are short.
+
+    The MEG TTL box does not have this problem, since its firmware times the
+    pulse and the host issues one command and returns immediately. It is
+    measured at the same rate anyway, so the two are directly comparable.
+
+    # What the width distribution can settle
+
+    The firmware sets the line high and computes an end time from millis(),
+    which truncates, so the realised width should be uniform on [w-1, w] -- a
+    flat histogram exactly 1 ms wide. Measured on a bench scope at n=50 the
+    spread was 1.9-2.0 ms, about a millisecond more than that model allows, and
+    the explanation offered at the time (that the onset also lands at an
+    arbitrary point within a tick) does not survive inspection: the rise and the
+    millis() read happen microseconds apart, so the same offset cancels out of
+    the width.
+
+    So the extra millisecond is unexplained, and the shape of the distribution
+    at large n is what discriminates. A flat 1 ms says the model holds and the
+    scope was measuring something else; a flat 2 ms, or two overlapping humps,
+    says something in the firmware or its timebase is doing what the model does
+    not describe. Raw per-trial widths are recorded so the histogram can be
+    drawn rather than summarised away.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from ad3 import AD3, falling_edges, rising_edges
+
+    policy, prio = scheduling_now()
+    print(f"  scheduling     {policy} priority {prio}")
+    print(f"  device         {args.device}")
+    if args.condition == "rt" and policy not in ("SCHED_FIFO", "SCHED_RR"):
+        sys.exit(f"--condition rt but this process is {policy}. Run under chrt.")
+
+    slack_ms = 16384 / args.rate * 1000
+    longest = max(args.widths)
+    if slack_ms < longest * 1.5:
+        sys.exit(f"--rate {args.rate/1e3:.0f} kS/s leaves {slack_ms:.0f} ms of "
+                 f"buffer, which a {longest:.0f} ms pulse would overrun during "
+                 f"the busy-wait. Lower the rate or shorten the widths.")
+
+    ch = 1 if args.device == "ttlbox" else 0
+    import contextlib
+    with contextlib.ExitStack() as stack:
+        if args.device == "ttlbox":
+            from ttlbox_min import TTLBoxMin
+            box = stack.enter_context(TTLBoxMin())
+            dlp = None
+            print(f"  ttlbox         firmware v{box.version}, caps 0x{box.caps:02X}")
+        else:
+            dlp = stack.enter_context(DLPIO8(port=args.port))
+            box = None
+        ad3 = stack.enter_context(AD3(rate=args.rate))
+        print(f"  AD3            {args.rate/1e3:.0f} kS/s, {slack_ms:.0f} ms of "
+              f"buffer slack, channel {ch + 1}\n")
+
+        with Recorder(args.out, f"pulse-stream-{args.device}-{args.condition}",
+                      ["condition", "device", "policy", "priority",
+                       "requested_ms", "trial", "width_ms"]) as rec:
+            for width in args.widths:
+                if box:
+                    box.set_trigger_duration(int(round(width)))
+                    time.sleep(0.05)
+                else:
+                    dlp.low(args.out_ch)
+                time.sleep(0.05)
+
+                isi = (width + args.gap) / 1000
+                duration = args.trials * isi + 1.5
+                state = {"trial": 0, "next": 0.3}
+
+                def on_tick(t, state=state, width=width):
+                    if t < state["next"] or state["trial"] >= args.trials:
+                        return
+                    if box:
+                        # One command; the firmware times the width and drops
+                        # the line itself, so the drain loop is not held.
+                        box.send_trigger(0x01)
+                    else:
+                        dlp.high(args.out_ch)
+                        end = time.perf_counter() + width / 1000
+                        while time.perf_counter() < end:
+                            pass
+                        dlp.low(args.out_ch)
+                    state["trial"] += 1
+                    state["next"] = t + isi
+
+                data, stats = ad3.record(duration, on_tick=on_tick)
+                if stats["lost"] or stats["corrupted"]:
+                    sys.exit(f"  {width} ms: {stats['lost']} lost, "
+                             f"{stats['corrupted']} corrupted -- the capture has "
+                             f"holes in it. Lower --rate and re-run.")
+
+                rise = rising_edges(data[ch], args.rate)
+                fall = falling_edges(data[ch], args.rate)
+                widths = []
+                for r in rise:
+                    later = fall[fall > r]
+                    if later.size:
+                        widths.append((later[0] - r) * 1000)
+                for i, w in enumerate(widths):
+                    rec.row(args.condition, args.device, policy, prio, width, i, w)
+
+                print(f"  requested {width:g} ms: {state['trial']} fired, "
+                      f"{len(widths)} measured")
+                print(f"    {describe(widths, 'ms')}")
+                if widths:
+                    ws = sorted(widths)
+                    print(f"    => median error {quantile(ws, .5) - width:+.4f} ms, "
+                          f"spread {ws[-1] - ws[0]:.4f} ms")
+            if box:
+                box.set_port(0x00)
+            else:
+                dlp.low(args.out_ch)
+            print(f"\n  wrote {rec.path}")
+
+
 # -------------------------------------------------------------------- main
 
 def main():
@@ -744,6 +1050,30 @@ def main():
                         "or ttlbox (firmware-timed width, scope CH1)")
     s.add_argument("--trigger-timeout", type=float, default=1.5)
     s.set_defaults(fn=block_pulse)
+
+    s = sub.add_parser("pulse-stream", parents=[common],
+                       help="pulse width at large n, streamed from an AD3")
+    s.add_argument("--trials", type=int, default=1000)
+    s.add_argument("--widths", type=float, nargs="+", default=[5, 10, 20, 50])
+    s.add_argument("--rate", type=float, default=1e5,
+                   help="AD3 sample rate; bounded by the busy-wait, see the block doc")
+    s.add_argument("--gap", type=float, default=20, help="ms between pulses")
+    s.add_argument("--device", default="dlp", choices=["dlp", "ttlbox"])
+    s.add_argument("--condition", default="idle")
+    s.set_defaults(fn=block_pulse_stream)
+
+    s = sub.add_parser("h2h-stream", parents=[common],
+                       help="head-to-head streamed from an Analog Discovery 3")
+    s.add_argument("--trials", type=int, default=2000)
+    s.add_argument("--rate", type=float, default=2.5e5,
+                   help="AD3 sample rate; 250 kS/s streams reliably for minutes, "
+                        "1 MS/s does not")
+    s.add_argument("--isi", type=float, default=30, help="minimum ms between trials")
+    s.add_argument("--jitter", type=float, default=20, help="ms of uniform jitter on the ISI")
+    s.add_argument("--pair-window", type=float, default=5000,
+                   help="us within which two edges count as one trial")
+    s.add_argument("--condition", default="idle")
+    s.set_defaults(fn=block_h2h_stream)
 
     s = sub.add_parser("headtohead", parents=[common],
                        help="DLP vs the MEG TTL box on one scope (needs both)")

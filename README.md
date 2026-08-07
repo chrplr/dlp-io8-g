@@ -148,6 +148,214 @@ Here is the result on an oscilloscope:
 ![](triggers-100ms.png)
       
 
+## The same examples in Go
+
+The [`golang/`](golang/) directory holds a package covering the same ground. It
+is not a transliteration of the Python: the byte codes live inside it, so the
+examples below name channels rather than remembering that `Y` lowers line 6.
+
+The module is called `dlp` rather than a URL, so `go get` will not fetch it.
+Point a module at your working copy:
+
+```bash
+go mod edit -require=dlp@v0.0.0 -replace=dlp=/path/to/dlp-io8-g/golang
+go mod tidy
+```
+
+The timing sections above apply unchanged — same device, same USB path. In
+particular the Go examples get no closer to the hardware than the Python ones
+do, and example 4 needs `chrt -f 50` for the same reason.
+
+### Example 1 in Go: all lines low, high, low
+
+```go
+// Set all eight lines low, then high, then low again.
+package main
+
+import (
+	"log"
+	"time"
+
+	"dlp"
+)
+
+func main() {
+	d, err := dlp.New("") // empty path: find the device by its USB id
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer d.Close()
+
+	all := []int{1, 2, 3, 4, 5, 6, 7, 8}
+	for _, step := range []struct {
+		name string
+		fn   func(...int) error
+	}{{"low", d.Low}, {"high", d.High}, {"low", d.Low}} {
+		if err := step.fn(all...); err != nil {
+			log.Fatalf("setting all lines %s: %v", step.name, err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+```
+
+`dlp.New("")` resolves the port through `/dev/serial/by-id/`, which is worth
+preferring to a hardcoded `/dev/ttyUSB0`: any other FTDI instrument competes for
+that name and which one wins depends on plug order.
+
+### Example 2 in Go: writing on lines 1 to 4
+
+```go
+// Drive lines 1-4 as a group.
+package main
+
+import (
+	"log"
+
+	"dlp"
+)
+
+func main() {
+	d, err := dlp.New("")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer d.Close()
+
+	if err := d.WriteMask(0x00); err != nil { // all eight low
+		log.Fatal(err)
+	}
+	if err := d.High(1, 2, 3, 4); err != nil {
+		log.Fatal(err)
+	}
+	if err := d.Low(1, 2, 3, 4); err != nil {
+		log.Fatal(err)
+	}
+	// WriteMask says the same thing in one call, and is equally non-atomic:
+	// it still emits one byte per line.
+	if err := d.WriteMask(0x0F); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+`WriteMask` is a convenience, not an atomic port write — there is no such thing
+on this device. See [Do not send multi-bit codes to a fast
+sampler](#do-not-send-multi-bit-codes-to-a-fast-sampler).
+
+### Example 3 in Go: detecting changes on input line 1
+
+```go
+// Print every change of state on input line 1.
+package main
+
+import (
+	"fmt"
+	"log"
+	"time"
+
+	"dlp"
+)
+
+func main() {
+	d, err := dlp.New("")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer d.Close()
+
+	// Without this the FTDI driver batches replies at its 16 ms default and the
+	// loop below runs at 63 Hz instead of ~1 kHz. Needs write access to sysfs.
+	if err := d.SetLatencyTimer(1); err != nil {
+		log.Printf("could not lower the latency timer, polling will be slow: %v", err)
+	}
+
+	start := time.Now()
+	prev := byte(2) // impossible state, so the first reading always prints
+	for {
+		state, err := d.Read(1)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if state[0] != prev {
+			fmt.Printf("%9.6f  %d\n", time.Since(start).Seconds(), state[0])
+			prev = state[0]
+		}
+	}
+}
+```
+
+Two differences from the Python. The package defaults to the module's binary
+mode, one reply byte per channel instead of three, so nothing has to strip a
+trailing LF/CR. And `SetLatencyTimer` is on the device rather than something you
+remember to `echo` into sysfs beforehand — the setting reverts on replug, and a
+poll loop that silently runs sixteen times slower than intended is not a failure
+you notice from inside the program.
+
+### Example 4 in Go: pulses at regular intervals
+
+```go
+// Emit 1000 pulses of 10 ms at 100 ms intervals on line 1.
+package main
+
+import (
+	"fmt"
+	"log"
+	"runtime"
+	"time"
+
+	"dlp"
+)
+
+const (
+	nPeriods = 1000
+	timeHigh = 10 * time.Millisecond
+	timeLow  = 90 * time.Millisecond
+	period   = timeHigh + timeLow
+)
+
+func main() {
+	// Keep this goroutine on one OS thread, so that the thread chrt raised is
+	// the thread doing the timing.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	d, err := dlp.New("")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer d.Close()
+
+	t0 := time.Now()
+	for i := 0; i < nPeriods; i++ {
+		// Each onset is computed from t0, not from the previous one, so a late
+		// pulse does not push every later pulse late with it.
+		for onset := t0.Add(time.Duration(i) * period); time.Now().Before(onset); {
+		}
+		if err := d.Pulse(1, timeHigh); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("\r%4d", i+1)
+	}
+	fmt.Printf("\n%d periods of %v in %v\n", nPeriods, period, time.Since(t0))
+}
+```
+
+`Pulse` busy-waits between the two writes rather than sleeping, exactly as the
+Python does, because the module has no pulse timer of its own and the width is
+whatever elapses between the host's two commands. That removes sleep granularity
+but not preemption: the realised width tracks the request to within a few tens of
+microseconds on an idle host, and stays there under full CPU load *only* at
+real-time priority — see [Timing: two things to do before collecting data on
+Linux](#timing-two-things-to-do-before-collecting-data-on-linux). Run it as
+`chrt -f 50 ./ex4`.
+
+`runtime.LockOSThread` matters more in Go than the equivalent does in Python.
+`chrt` raises every thread of the process at exec, but the Go runtime is free to
+migrate a goroutine between threads, and in-program elevation raises only the
+calling thread — so without the lock, the goroutine doing the timing is not
+reliably the one you raised.
+
 ## Full list of commands:
 
 | ASCII |  Hex | Description       | Return                             |
@@ -231,11 +439,11 @@ the median error reaches +1.85 ms with 4.75 ms of spread. That is the host's
 scheduler descheduling your process, not the device — the host's own busy-wait
 interval degrades identically. Real-time priority removes it:
 
-| host state | median error | spread |
-|---|---|---|
-| idle | −10 to −20 µs | ≤ 120 µs |
-| loaded, normal priority | up to +1.85 ms | up to 4.75 ms |
-| loaded, `chrt -f 50` | −35 to −60 µs | 70–120 µs |
+| host state | median error | spread | n per width |
+|---|---|---|---|
+| idle | within ±30 µs | ≤ 150 µs | 1000 |
+| loaded, normal priority | up to +1.85 ms | up to 4.75 ms | 50 |
+| loaded, `chrt -f 50` | +33 to +47 µs | 130–150 µs | 1000 |
 
 ```bash
 chrt -f 50 ./my-experiment
@@ -325,8 +533,11 @@ and increasing order of precision:
 | outbound latency ≈ tens of µs | the extrapolation above |
 | outbound latency = *x* | not available without a zero-latency host reference |
 
-The middle figure is consistent with the head-to-head against a NeuroSpin MEG
-TTL box, which put the two devices within 38 µs of each other.
+The middle figure is consistent with a head-to-head against a NeuroSpin MEG TTL
+box, which puts the two devices within tens of microseconds of each other. That
+comparison bounds the difference but does not resolve it — see
+[`measurements/`](measurements/#write-latency-the-difference-is-not-resolved-and-here-is-why)
+for why reversing the write order does not cancel the host's contribution here.
 
 ### Measuring it properly
 

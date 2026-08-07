@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# Digilent WaveForms SDK drops this wherever the process runs
+DebugErc.log
