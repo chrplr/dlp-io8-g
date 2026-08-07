@@ -30,9 +30,17 @@ The following Python code, switches all data lines to 0, then 1, then  0 again, 
     dlp.write(b'QWERTYUI')  # sets all lines back to '0'
 ```    
 
-The following capture from a scope shows that, at the 115200 baudrate, the delay between the edges of the first and 8th line is less than 1msec. 
+The lines do **not** change together. Each command is a single byte, so the eight
+edges are spread over about 610 µs — see [Do not send multi-bit codes to a fast
+sampler](#do-not-send-multi-bit-codes-to-a-fast-sampler) below.
 
 ![](scope_4lines_A.jpg)
+
+*(This capture was long cited here as showing "less than 1 ms". It does bound the
+skew, but it cannot measure it: the timebase is 1.00 ms/div, so the whole screen
+is 10 ms and the per-byte effect is ~87 µs — under a tenth of a division. The
+610 µs figure comes from a later measurement at 200 µs/div with per-edge
+readout; see [`measurements/`](measurements/).)*
 
 Note: DLP design also manufactures modules with with 14 or 20 lines (see <http://www.dlpdesign.com/usb/>)
 
@@ -196,6 +204,59 @@ Here is the result on an oscilloscope:
 A full description of the device is available at <http://www.ftdichip.com/Support/Documents/DataSheets/DLP/dlp-io8-ds-v15.pdf>
 
 
+
+## Timing: two things to do before collecting data on Linux
+
+Both were measured on this device; raw data and method in
+[`measurements/`](measurements/).
+
+**1. Lower the FTDI latency timer, if you read inputs.** The `ftdi_sio` default
+is 16 ms, and it gates every reply: an 8-channel read costs 15.98 ms and a poll
+loop runs at 63 Hz. At 1 ms the same read costs 1.01 ms and 995 Hz.
+
+```bash
+echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+```
+
+That reverts on replug; a udev rule makes it stick:
+
+```
+SUBSYSTEM=="usb-serial", DRIVERS=="ftdi_sio", ATTR{latency_timer}="1"
+```
+
+It does nothing for *sending* triggers — output latency is USB frame scheduling.
+
+**2. Run the experiment at real-time priority.** With a single line the device
+places a pulse within ~20 µs of the request on an idle host, but under CPU load
+the median error reaches +1.85 ms with 4.75 ms of spread. That is the host's
+scheduler descheduling your process, not the device — the host's own busy-wait
+interval degrades identically. Real-time priority removes it:
+
+| host state | median error | spread |
+|---|---|---|
+| idle | −10 to −20 µs | ≤ 120 µs |
+| loaded, normal priority | up to +1.85 ms | up to 4.75 ms |
+| loaded, `chrt -f 50` | −35 to −60 µs | 70–120 µs |
+
+```bash
+chrt -f 50 ./my-experiment
+```
+
+That needs a one-time grant — a file in `/etc/security/limits.d/` giving your
+user `rtprio 50`, then a full logout and login. The priority passed to `chrt`
+must not exceed the granted value, or it fails with "Operation not permitted".
+
+## Do not send multi-bit codes to a fast sampler
+
+There is no atomic multi-channel write: every command is a single ASCII byte for
+one line, so setting an 8-bit code sends eight of them and **the port takes
+~610 µs to settle** (86.2 µs per byte, measured n=99). Against a system sampling
+at 1 kHz that is about 61 % of a sample period, so a code change is sampled
+mid-transition roughly three times in five and recorded as a value that was
+never sent.
+
+Use **one line per event type, pulsed**: a single command byte, no skew at all,
+and eight lines still distinguish eight event types.
 
 ## Installation
 
