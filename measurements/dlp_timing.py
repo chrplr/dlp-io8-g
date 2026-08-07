@@ -421,6 +421,26 @@ def block_skew(args):
             print(f"\n  wrote {rec.path}")
 
 
+def scheduling_now():
+    """This process's scheduling policy and priority, as (name, priority).
+
+    Recorded per run because it changes the result by milliseconds and leaves no
+    trace in the data. A CSV labelled "rt" that was actually collected at normal
+    priority -- because chrt silently failed, or the rtprio grant was not live --
+    is worse than no data, since it would be read as evidence that real-time
+    scheduling does not help.
+    """
+    try:
+        policy = os.sched_getscheduler(0)
+        names = {os.SCHED_OTHER: "SCHED_OTHER", os.SCHED_FIFO: "SCHED_FIFO",
+                 os.SCHED_RR: "SCHED_RR", os.SCHED_BATCH: "SCHED_BATCH",
+                 os.SCHED_IDLE: "SCHED_IDLE"}
+        return names.get(policy, f"policy{policy}"), \
+            os.sched_getparam(0).sched_priority
+    except (AttributeError, OSError):
+        return "unknown", 0
+
+
 def block_pulse(args):
     """Single-line pulse width and its jitter, measured by the scope.
 
@@ -445,6 +465,14 @@ def block_pulse(args):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from scope import Scope
 
+    policy, prio = scheduling_now()
+    print(f"  scheduling     {policy} priority {prio}")
+    if args.condition == "rt" and policy not in ("SCHED_FIFO", "SCHED_RR"):
+        sys.exit(f"--condition rt but this process is {policy}, not real-time.\n"
+                 f"Run it under chrt (chrt -f 50 ...), and check `ulimit -r` is "
+                 f"not 0.\nRefusing to write a CSV labelled 'rt' that was "
+                 f"collected at normal priority.")
+
     with DLPIO8(port=args.port) as dlp, Scope(host=args.scope) as s:
         print(f"  scope {s.idn}")
         s.channel(1, on=True, vdiv=1, offset=-2, coupling="D1M")
@@ -454,8 +482,8 @@ def block_pulse(args):
         s.trigger_edge(1, level=2.5, slope="POS", mode="SINGLE")
 
         with Recorder(args.out, f"pulse-{args.condition}",
-                      ["condition", "requested_ms", "trial",
-                       "host_width_ms", "scope_width_ms"]) as rec:
+                      ["condition", "policy", "priority", "requested_ms",
+                       "trial", "host_width_ms", "scope_width_ms"]) as rec:
             for width in args.widths:
                 # Put the pulse across about a third of the screen: wide enough
                 # to measure precisely, narrow enough that the whole pulse and
@@ -482,7 +510,7 @@ def block_pulse(args):
                     w = s.param(1, "PWID")
                     if w is not None:
                         scope_w.append(w * 1000)
-                        rec.row(args.condition, width, trial,
+                        rec.row(args.condition, policy, prio, width, trial,
                                 host_w[-1], w * 1000)
                 print(f"\n  requested {width} ms:")
                 print(f"    host busy-wait   {describe(host_w, 'ms')}")

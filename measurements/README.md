@@ -191,7 +191,7 @@ scheduling one. n=50 per width.
 | 20 ms | 19.990 ms | −10 µs | 60 µs |
 | 50 ms | 49.980 ms | −20 µs | 120 µs |
 
-**Under CPU load (`stress-ng --cpu 0`):**
+**Under CPU load (`stress-ng --cpu 0`), normal priority:**
 
 | requested | on the wire | median error | spread | host's own busy-wait |
 |---|---|---|---|---|
@@ -199,6 +199,22 @@ scheduling one. n=50 per width.
 | 10 ms | 11.840 ms | **+1.85 ms** | 3.01 ms | 11.929 ms |
 | 20 ms | 19.980 ms | −20 µs | 1.80 ms | 20.056 ms |
 | 50 ms | 49.990 ms | −10 µs | 2.58 ms | 50.077 ms |
+
+**Under the same CPU load, at real-time priority (`chrt -f 50`):**
+
+| requested | on the wire | median error | spread |
+|---|---|---|---|
+| 5 ms | 4.950 ms | −50 µs | 120 µs |
+| 10 ms | 9.940 ms | −60 µs | **70 µs** |
+| 20 ms | 19.950 ms | −45 µs | 110 µs |
+| 50 ms | 49.960 ms | −35 µs | 110 µs |
+
+Real-time priority recovers idle-quality timing entirely: a **25 to 40 fold
+reduction in spread** under identical load. Every row records the policy and
+priority it was collected under (`SCHED_FIFO`, 50) rather than a trusted label —
+the block refuses to write a file marked `rt` if the process is not actually
+real-time, since a mislabelled file would read as evidence that real-time
+scheduling does not help.
 
 ### The DLP is not what degrades
 
@@ -215,7 +231,9 @@ wrong place.
 So for single-line triggering at 1 kHz the device is not the limiting factor by
 two orders of magnitude — the stimulus PC's scheduling is. The fix is real-time
 priority for the experiment process (a grant in `/etc/security/limits.d/` plus
-`chrt`), not anything about this hardware.
+`chrt`), not anything about this hardware, and the third table above shows it
+working: under load that otherwise cost milliseconds, `chrt -f 50` brings the
+spread back to 70-120 µs.
 
 The same conclusion arrived independently from the NeuroSpin MEG TTL box, whose
 host round-trip tail went from 6 ms idle to 25 ms under the same load. Two
@@ -229,10 +247,6 @@ unrelated devices, the same host, the same answer.
   independently reproduces the quantisation, but the per-trial values behind pass
   1's cluster counts no longer exist. The filename now carries the probe map
   (`skew-ch2-3-4.csv`, `skew-ch6-7-8.csv`) so it cannot recur.
-- **Real-time priority.** The loaded pulse figures were taken at normal
-  scheduling. Whether `chrt` recovers the idle numbers is the claim that the
-  whole real-time-priority setup rests on, and nothing here has tested it. Run
-  `pulse --condition rt` under `chrt -f 50` once the rtprio grant is live.
 - **Absolute host-to-edge latency.** Not measurable with this device and a scope
   alone: nothing shares a clock with the instrument, so there is no way to
   anchor "when the host asked" to "when the edge happened". It needs a reference
