@@ -239,6 +239,100 @@ The same conclusion arrived independently from the NeuroSpin MEG TTL box, whose
 host round-trip tail went from 6 ms idle to 25 ms under the same load. Two
 unrelated devices, the same host, the same answer.
 
+## Head to head with the NeuroSpin MEG TTL box
+
+Both devices driven from one host loop, both edges captured in one scope
+acquisition. Wiring: TTL box D30 on CH1, DLP ch1 on CH2, common ground.
+
+### Write latency: indistinguishable
+
+Writing to A then B and measuring the edge gap includes the host's own gap
+between the two writes, which is unknown. Running both orders removes it:
+
+    delta(A then B) = lat_B - lat_A + gap
+    delta(B then A) = lat_A - lat_B + gap
+
+so half their difference is the latency difference, whatever the gap was.
+n=98 and 99, single-shot acquisitions, idle host at normal priority:
+
+| arm | p50 | p95 | max |
+|---|---|---|---|
+| TTL box written first | 128.81 µs | 200.63 | 463.91 |
+| DLP written first | 51.90 µs | 72.27 | 127.27 |
+
+**DLP write latency minus TTL box write latency: +38 µs.** Against a ~1 ms USB
+frame that is nothing: for getting a single trigger onto a wire, the two cannot
+be told apart, and the choice between them must be made on something else.
+
+Two notes on the method. Both arms' minima are comfortably positive (16.2 and
+12.0 µs), so no trial had the second edge arrive before the trigger — the
+scope triggers on the first-written channel, so a distribution straddling zero
+would have been silently truncated and the answer quietly wrong. And half the
+*sum* of the medians is a by-product worth having: about **90 µs** for the host
+to write to two different serial devices back to back.
+
+The spreads differ nearly fourfold between arms, which cannot be the devices —
+each arm contains both of their latencies. It is the host's write path, which
+differs by order: the TTL box is `cdc_acm` on ttyACM, the DLP is `ftdi_sio` on
+ttyUSB. Recorded as an observation, not explained.
+
+### Pulse width: the real difference, and it is not speed
+
+Same measurement on both devices — scope-measured realised width, n=50 per
+width — under three host conditions. The DLP's width is the interval between
+two host writes; the TTL box's is timed by its firmware from a single command.
+
+**TTL box (firmware-timed), spread in ms:**
+
+| condition | 5 ms | 10 ms | 20 ms | 50 ms |
+|---|---|---|---|---|
+| idle | 1.96 | 2.00 | 2.01 | 1.93 |
+| under CPU load | 1.55 | 2.01 | 1.96 | 1.95 |
+| load + `chrt -f 50` | 1.92 | 1.93 | 1.90 | 1.92 |
+
+**DLP-IO8 (host-timed), spread in ms:**
+
+| condition | 5 ms | 10 ms | 20 ms | 50 ms |
+|---|---|---|---|---|
+| idle | 0.05 | 0.11 | 0.06 | 0.12 |
+| under CPU load | **4.75** | **3.01** | **1.80** | **2.58** |
+| load + `chrt -f 50` | 0.12 | 0.07 | 0.11 | 0.11 |
+
+Twelve numbers for the TTL box, all 1.9–2.0 ms, unmoved by CPU load and unmoved
+by real-time priority. The host is genuinely not in that loop.
+
+Neither device is simply better:
+
+* **Configured correctly the DLP is about 16× more precise** — 0.11 ms against
+  1.93 ms — because the TTL box pays a fixed `millis()` truncation the DLP does
+  not.
+* **Configured carelessly the DLP is about 40× worse**, and the TTL box does not
+  notice.
+
+So the TTL box offers roughly 2 ms of width uncertainty that cannot be improved,
+and the DLP offers 0.1 ms *if* real-time priority is set up and 4 ms if it is
+not. One is a property of the device; the other is a property of the system
+administration. Which is preferable depends on whether the machine's
+configuration is under your control and will stay that way.
+
+### An anomaly, stated rather than explained
+
+The TTL box's spread is ~1.9 ms where `millis()` truncation alone predicts
+~1.0 ms — a realised width uniform on [w−1, w]. About a millisecond is
+unaccounted for, and it is constant across every width and every condition, so
+it is not load. The likely explanation is that the pulse *onset* also falls at
+an arbitrary point within a `millis()` tick, adding a second independent ±1 ms;
+two uniform milliseconds combine to a ~2 ms range. That is a hypothesis fitted
+to the observation, not a measurement, and it should be tested before being
+repeated as fact.
+
+## A note on the file schemas
+
+`pulse-dlp-*.csv` were recorded before the block gained a `--device` column and
+so lack it; `pulse-ttlbox-*.csv` and everything later carry it. The DLP files
+were renamed rather than re-recorded, since the measurement itself is unchanged
+and instrument time is better spent on things not yet measured.
+
 ## Not measured
 
 - **Pass 1's raw per-trial rows.** Lost. The skew block wrote to a fixed

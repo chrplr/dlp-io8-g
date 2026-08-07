@@ -467,61 +467,221 @@ def block_pulse(args):
 
     policy, prio = scheduling_now()
     print(f"  scheduling     {policy} priority {prio}")
+    print(f"  device         {args.device}")
     if args.condition == "rt" and policy not in ("SCHED_FIFO", "SCHED_RR"):
         sys.exit(f"--condition rt but this process is {policy}, not real-time.\n"
                  f"Run it under chrt (chrt -f 50 ...), and check `ulimit -r` is "
                  f"not 0.\nRefusing to write a CSV labelled 'rt' that was "
                  f"collected at normal priority.")
 
-    with DLPIO8(port=args.port) as dlp, Scope(host=args.scope) as s:
-        print(f"  scope {s.idn}")
-        s.channel(1, on=True, vdiv=1, offset=-2, coupling="D1M")
-        for ch in (2, 3, 4):
-            s.channel(ch, on=False)
-        s.apply("TRDL 0S", "TRDL?", None)
-        s.trigger_edge(1, level=2.5, slope="POS", mode="SINGLE")
+    # Scope channel per device, matching the head-to-head wiring.
+    scope_ch = 1 if args.device == "ttlbox" else 2
 
-        with Recorder(args.out, f"pulse-{args.condition}",
-                      ["condition", "policy", "priority", "requested_ms",
-                       "trial", "host_width_ms", "scope_width_ms"]) as rec:
+    import contextlib
+    with contextlib.ExitStack() as stack:
+        if args.device == "ttlbox":
+            from ttlbox_min import TTLBoxMin
+            box = stack.enter_context(TTLBoxMin())
+            print(f"  ttlbox         firmware v{box.version}, caps 0x{box.caps:02X}")
+            dlp = None
+        else:
+            dlp = stack.enter_context(DLPIO8(port=args.port))
+            box = None
+        s = stack.enter_context(Scope(host=args.scope))
+        print(f"  scope {s.idn}")
+        s.reset()
+        s.channel(scope_ch, on=True, vdiv=1, offset=-2, coupling="D1M")
+        for ch in (1, 2, 3, 4):
+            if ch != scope_ch:
+                s.channel(ch, on=False)
+        s.apply("TRDL 0S", "TRDL?", None)
+        s.trigger_edge(scope_ch, level=2.5, slope="POS", mode="SINGLE")
+
+        with Recorder(args.out, f"pulse-{args.device}-{args.condition}",
+                      ["condition", "device", "policy", "priority",
+                       "requested_ms", "trial", "host_width_ms",
+                       "scope_width_ms"]) as rec:
             for width in args.widths:
                 # Put the pulse across about a third of the screen: wide enough
                 # to measure precisely, narrow enough that the whole pulse and
                 # both edges stay inside the record.
                 s.timebase(round(width / 1000 / 4, 9))
                 host_w, scope_w, misses = [], [], 0
+                if box:
+                    box.set_trigger_duration(int(round(width)))
+                    time.sleep(0.05)
                 for trial in range(args.trials):
+                    if box:
+                        box.set_port(0x00)
+                    else:
+                        dlp.low(args.out_ch)
+                    time.sleep(0.02)
+                    s.apply("TRMD SINGLE", "TRMD?", None)
+                    if not s.wait_armed(timeout=args.trigger_timeout):
+                        misses += 1
+                        continue
+                    if box:
+                        # One command. The firmware times the width and drops
+                        # the line itself, so the host is not in that loop at
+                        # all -- which is exactly the property under test.
+                        box.send_trigger(0x01)
+                        host_w.append(float("nan"))
+                        time.sleep(width / 1000 + 0.02)
+                    else:
+                        t0 = time.perf_counter()
+                        dlp.high(args.out_ch)
+                        end = t0 + width / 1000
+                        while time.perf_counter() < end:
+                            pass
+                        dlp.low(args.out_ch)
+                        host_w.append((time.perf_counter() - t0) * 1000)
+                    if not s.wait_stopped(timeout=args.trigger_timeout):
+                        misses += 1
+                        continue
+                    w = s.param(scope_ch, "PWID")
+                    if w is not None:
+                        scope_w.append(w * 1000)
+                        rec.row(args.condition, args.device, policy, prio,
+                                width, trial, host_w[-1], w * 1000)
+                print(f"\n  requested {width} ms:")
+                hw = [x for x in host_w if x == x]     # drop NaN (firmware-timed)
+                if hw:
+                    print(f"    host busy-wait   {describe(hw, 'ms')}")
+                else:
+                    print(f"    host busy-wait   n/a - the firmware times this pulse")
+                print(f"    on the wire      {describe(scope_w, 'ms')}")
+                if scope_w:
+                    # Same p50 as describe() prints just above, so the summary
+                    # cannot appear to disagree with its own distribution.
+                    err = quantile(sorted(scope_w), .5) - width
+                    print(f"    => median error {err:+.4f} ms, "
+                          f"spread {max(scope_w) - min(scope_w):.4f} ms")
+                if misses:
+                    print(f"    {misses}/{args.trials} trials did not trigger")
+            if box:
+                box.set_port(0x00)
+            else:
+                dlp.low(args.out_ch)
+            print(f"\n  wrote {rec.path}")
+
+
+def block_headtohead(args):
+    """DLP-IO8 against the NeuroSpin MEG TTL box, driven from one host loop.
+
+    Neither device can be given an absolute host-to-edge latency on its own:
+    nothing shares a clock with the scope. But the DIFFERENCE between two
+    devices is measurable to microseconds, because both edges land in one
+    acquisition on one timebase. The MEG box's absolute latency is separately
+    known (~1.5 ms median, measured against a BBTKv3), so the difference
+    converts the DLP's timing into absolute terms.
+
+    The host's own gap between the two writes would otherwise contaminate this:
+
+        delta(A then B) = lat_B - lat_A + gap
+        delta(B then A) = lat_A - lat_B + gap
+
+    so half their difference is lat_B - lat_A with the gap eliminated, whatever
+    it was. That is why both arms are run and why the trigger follows whichever
+    device is written first -- the delay measurement needs the reference edge to
+    come first, and the second arm reverses which that is.
+
+    What the two commands cost on the wire is part of the answer, not noise to
+    be controlled away: a DLP trigger is one ASCII byte, a TTL box trigger is a
+    two-byte opcode frame, and an experiment pays whatever its device asks for.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from scope import Scope
+    from ttlbox_min import TTLBoxMin
+
+    policy, prio = scheduling_now()
+    print(f"  scheduling     {policy} priority {prio}")
+
+    with DLPIO8(port=args.port) as dlp, TTLBoxMin() as box, Scope(host=args.scope) as s:
+        print(f"  ttlbox         firmware v{box.version}, caps 0x{box.caps:02X}")
+        print(f"  scope          {s.idn}")
+        # Start from defaults: a block that arms single acquisitions leaves the
+        # instrument stopped, and inheriting that state makes every measurement
+        # return "****" while still reporting the mode it was asked for.
+        s.reset()
+        for ch in (1, 2):
+            s.channel(ch, on=True, vdiv=1, offset=-2, coupling="D1M")
+        for ch in (3, 4):
+            s.channel(ch, on=False)
+        s.timebase(args.tdiv)
+        s.apply("TRDL 0S", "TRDL?", None)
+        print(f"  {s.value('TDIV?') * 1e6:.0f} us/div, {s.value('SARA?'):.3g} Sa/s")
+        print(f"  CH1 = TTL box D30, CH2 = DLP ch{args.out_ch}\n")
+
+        # (name, scope channel written first, scope channel written second)
+        arms = {"box-first": (1, 2), "dlp-first": (2, 1)}
+        results = {}
+
+        with Recorder(args.out, "headtohead",
+                      ["arm", "policy", "priority", "trial",
+                       "first_ch", "second_ch", "delta_us"]) as rec:
+            for name, (first, second) in arms.items():
+                s.trigger_edge(first, level=2.5, slope="POS", mode="SINGLE")
+                deltas, misses = [], 0
+                print(f"  {name}:", flush=True)
+                for trial in range(args.trials):
+                    if trial == args.probe and misses == trial:
+                        print(f"    aborted: none of the first {trial} trials "
+                              f"triggered on CH{first}.")
+                        break
+                    if args.trials > 20 and trial and trial % 20 == 0:
+                        print(f"    ... {trial}/{args.trials}", flush=True)
+
+                    box.set_port(0x00)
                     dlp.low(args.out_ch)
                     time.sleep(0.02)
                     s.apply("TRMD SINGLE", "TRMD?", None)
                     if not s.wait_armed(timeout=args.trigger_timeout):
                         misses += 1
                         continue
-                    t0 = time.perf_counter()
-                    dlp.high(args.out_ch)
-                    end = t0 + width / 1000
-                    while time.perf_counter() < end:
-                        pass
-                    dlp.low(args.out_ch)
-                    host_w.append((time.perf_counter() - t0) * 1000)
+
+                    # The two writes, back to back, in this arm's order.
+                    if name == "box-first":
+                        box.set_port(0x01)
+                        dlp.high(args.out_ch)
+                    else:
+                        dlp.high(args.out_ch)
+                        box.set_port(0x01)
+
                     if not s.wait_stopped(timeout=args.trigger_timeout):
                         misses += 1
                         continue
-                    w = s.param(1, "PWID")
-                    if w is not None:
-                        scope_w.append(w * 1000)
-                        rec.row(args.condition, policy, prio, width, trial,
-                                host_w[-1], w * 1000)
-                print(f"\n  requested {width} ms:")
-                print(f"    host busy-wait   {describe(host_w, 'ms')}")
-                print(f"    on the wire      {describe(scope_w, 'ms')}")
-                if scope_w:
-                    err = st.median(scope_w) - width
-                    print(f"    => median error {err:+.4f} ms, "
-                          f"spread {max(scope_w) - min(scope_w):.4f} ms")
+                    d = s.delay(first, second, "FRR")
+                    if d is not None:
+                        deltas.append(d * 1e6)
+                        rec.row(name, policy, prio, trial, first, second, d * 1e6)
+                    time.sleep(0.02)
+
+                results[name] = deltas
+                print(f"    {describe(deltas, 'us') if deltas else 'no measurement'}")
                 if misses:
                     print(f"    {misses}/{args.trials} trials did not trigger")
+
+            box.set_port(0x00)
             dlp.low(args.out_ch)
+
+            a, b = results.get("box-first", []), results.get("dlp-first", [])
+            if a and b:
+                # half the difference of the two medians: the host gap cancels
+                # Same p50 as describe() prints, so the summary cannot appear
+                # to disagree with the distribution just above it: nearest-rank
+                # reports an observed value, st.median interpolates on even n.
+                ma, mb = quantile(sorted(a), .5), quantile(sorted(b), .5)
+                diff = (ma - mb) / 2
+                print(f"\n  box-first median  {ma:+9.2f} us")
+                print(f"  dlp-first median  {mb:+9.2f} us")
+                print(f"  => DLP write latency minus TTL box write latency: "
+                      f"{diff:+.2f} us")
+                print(f"     (half the difference; the host's own gap between the")
+                print(f"      two writes cancels and need not be known)")
+                if abs(diff) < 50:
+                    print("     The two are within 50 us of each other: both are")
+                    print("     dominated by the same USB frame scheduling, and the")
+                    print("     choice between them cannot be made on write latency.")
             print(f"\n  wrote {rec.path}")
 
 
@@ -579,8 +739,21 @@ def main():
     s.add_argument("--scope", default=None, help="scope IP (default 10.11.13.220)")
     s.add_argument("--condition", default="idle",
                    help="label for the host condition, recorded in the CSV")
+    s.add_argument("--device", default="dlp", choices=["dlp", "ttlbox"],
+                   help="which box to pulse: dlp (host-timed width, scope CH2) "
+                        "or ttlbox (firmware-timed width, scope CH1)")
     s.add_argument("--trigger-timeout", type=float, default=1.5)
     s.set_defaults(fn=block_pulse)
+
+    s = sub.add_parser("headtohead", parents=[common],
+                       help="DLP vs the MEG TTL box on one scope (needs both)")
+    s.add_argument("--trials", type=int, default=100)
+    s.add_argument("--scope", default=None, help="scope IP (default 10.11.13.220)")
+    s.add_argument("--tdiv", type=float, default=200e-6, help="scope s/div")
+    s.add_argument("--trigger-timeout", type=float, default=1.5)
+    s.add_argument("--probe", type=int, default=3,
+                   help="abort an arm if none of the first N trials trigger")
+    s.set_defaults(fn=block_headtohead)
 
     s = sub.add_parser("discard", parents=[common],
                        help="are queued bytes lost? (needs jumper)")

@@ -285,6 +285,24 @@ class Scope:
         return False
 
 
+    def reset(self, settle=6.0):
+        """Return the instrument to its defaults before configuring a run.
+
+        Blocks that arm single acquisitions leave the instrument stopped, and a
+        later block that only sets TRMD inherits that: it reports the mode it
+        was asked for while acquiring nothing, and every measurement comes back
+        "****" on every channel including ones with a signal on them. Forcing a
+        trigger does not recover it. Starting from *RST costs six seconds and
+        removes a whole class of "the scope was in a state from the last run".
+
+        Nothing is lost by it here because every setting these blocks depend on
+        is applied over SCPI afterwards; a front-panel setup would be.
+        """
+        self.write("*RST")
+        time.sleep(settle)
+        self.write("CHDR OFF")
+        time.sleep(0.3)
+
     def wait_armed(self, timeout=5.0, poll=0.02):
         """Block until the instrument will actually accept a trigger.
 
