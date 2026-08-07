@@ -246,6 +246,72 @@ That needs a one-time grant — a file in `/etc/security/limits.d/` giving your
 user `rtprio 50`, then a full logout and login. The priority passed to `chrt`
 must not exceed the granted value, or it fails with "Operation not permitted".
 
+## Why no absolute latency is quoted here
+
+A natural idea is to measure the round trip — raise a TTL line, read it back, time
+the whole thing — and take half. It does not work, and the reason is worth
+knowing because it applies to every variant of the idea.
+
+**Every measurement you can make is a sum.** With devices A and B:
+
+    R_AB = out(A) + in(B)          R_AA = out(A) + in(A)
+    R_BA = out(B) + in(A)          R_BB = out(B) + in(B)
+
+Four equations, four unknowns — but `R_AB + R_BA = R_AA + R_BB` identically, so
+only three are independent. Adding more devices adds more sums, never a
+separation. This is the **one-way delay problem** from clock synchronisation:
+round-trip time is measurable to arbitrary precision, one-way delay is not
+derivable from it without a synchronised clock or independent knowledge of the
+asymmetry. It is why NTP assumes symmetry rather than measuring it.
+
+In the specific case of a self-loopback it is worse than underdetermined: the
+outbound latency **cancels**, because the trigger command and the polling command
+travel the same path and whatever delays one delays the other. Measured on this
+device at `latency_timer=1`:
+
+| | median round trip |
+|---|---|
+| bare poll (ask the device a question) | 0.997 ms |
+| loopback (raise a line, poll until it reads high) | 0.996 ms |
+
+Adding the entire outbound trigger to the loop cost **−0.001 ms**. There is no
+information about the outbound path in that number.
+
+### What can be recovered, without any instrument
+
+Vary the return path by a *known* amount and extrapolate. The FTDI latency timer
+does exactly that, and across 1, 2, 4, 8 and 16 ms:
+
+    bare poll  =  0.9984 x latency_timer  -  1.4 us
+    loopback   =  0.9994 x latency_timer  -  3.7 us
+
+Slope essentially exactly 1, and **both intercepts within a few microseconds of
+zero**. Extrapolating the FTDI batching to nothing, everything else in the loop —
+outbound dispatch, device processing, input detection — sums to under ~10 µs.
+Since none of those can be negative, that **bounds the outbound latency at a few
+tens of microseconds**, not the ~1 ms that "USB frames are 1 ms" would suggest.
+Bulk OUT transfers evidently go out within the current frame rather than waiting
+for the next.
+
+It is a bound, not a measurement: it assumes the return path is exactly the timer
+with no constant term. But it is much tighter than "unknown", and it is
+consistent with the head-to-head against a NeuroSpin MEG TTL box, which put the
+two devices within 38 µs of each other.
+
+### Measuring it properly
+
+It needs something this setup does not have: **an event the host can produce at a
+time it knows exactly, visible to the same instrument as the TTL output.** A
+parallel-port `outb` is the classic choice — a CPU instruction, so the host knows
+when it executed — and a memory-mapped GPIO write on an SBC is equivalent. With
+one of those, comparing the two edges on a scope in both orders gives the
+absolute figure directly.
+
+A USB protocol analyser would give the device-side half (packet on the wire → TTL
+edge) but not the host-side half, since `write()` returns before the packet
+leaves. Cheap logic analysers do not qualify: full-speed USB is 12 Mbit/s, so
+decoding it needs ~48–96 MS/s, and the common CY7C68013A boards sample at 24.
+
 ## Do not send multi-bit codes to a fast sampler
 
 There is no atomic multi-channel write: every command is a single ASCII byte for
