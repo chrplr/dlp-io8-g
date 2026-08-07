@@ -291,6 +291,212 @@ def block_shortest(args):
     sys.exit(block_shortest.__doc__.strip() + "\n\nNothing was measured.")
 
 
+def block_skew(args):
+    """Inter-line skew: what a multi-channel write actually does to the port.
+
+    The device has no atomic multi-channel write. Setting N channels means
+    sending N single-byte commands which the module acts on as they arrive, so
+    the port cannot change all at once and there is an interval during which it
+    shows a value that was never intended. This measures that interval.
+
+    The prediction, if the module simply acts on each byte as the UART delivers
+    it, is 10 bit-times per byte at 115200 -- 86.8 us -- and nothing else. Any
+    excess is per-byte processing inside the module, and it scales with how many
+    channels a trigger code spans.
+
+    The reverse-order arm is the control. Sending 87654321 instead of 12345678
+    must reverse the sign of every skew; if it does not, the module is not
+    acting on bytes in arrival order and the serialisation model is wrong,
+    whatever the numbers look like.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from scope import Scope
+
+    # Each pattern names the probed channel that rises FIRST. That channel is
+    # both the trigger source and the reference every delay is measured from,
+    # so the delays stay positive and the two arms are directly comparable.
+    # Triggering on ch1 for the reverse pattern measures nothing: ch1 rises
+    # last there, and the delays to channels that already rose are negative.
+    # --probe-map says which DLP channel each scope channel CH2..CH4 is on.
+    # The byte separation is then derived from the pattern itself rather than
+    # assumed: in pass 1 (ch2,ch3,ch4) the probes are 1, 2 and 3 bytes from the
+    # reference, in pass 2 (ch6,ch7,ch8) they are 5, 6 and 7. Hard-coding "3"
+    # for the farthest probe silently divides pass 2's span by the wrong number.
+    probe_dlp = [int(x) for x in args.probe_map.split(",")]
+    if len(probe_dlp) != 3:
+        raise SystemExit(f"--probe-map needs 3 DLP channels, got {args.probe_map!r}")
+
+    patterns = {"forward": (b"12345678", 1), "reverse": (b"87654321", 8)}
+    if args.pattern != "both":
+        patterns = {args.pattern: patterns[args.pattern]}
+
+    with DLPIO8(port=args.port) as dlp, Scope(host=args.scope) as s:
+        print(f"  scope {s.idn}")
+        for ch in (1, 2, 3, 4):
+            s.channel(ch, on=True, vdiv=1, offset=-2, coupling="D1M")
+        s.timebase(args.tdiv)
+        s.apply("TRDL 0S", "TRDL?", None)
+        print(f"  {s.value('TDIV?') * 1e6:.0f} us/div, "
+              f"{s.value('SARA?'):.3g} Sa/s\n")
+
+        # The probe map goes in the filename. Every other block encodes its
+        # condition there (poll-lt16, pulse-load); this one did not, and a pass 2
+        # validation run silently overwrote a completed pass 1 dataset that had
+        # taken seven minutes of instrument time to collect.
+        stem = "skew-ch" + "-".join(str(c) for c in probe_dlp)
+        with Recorder(args.out, stem,
+                      ["pattern", "ref_dlp_ch", "trial", "scope_ch",
+                       "byte_separation", "delay_us"]) as rec:
+            for name, (pattern, ref_dlp) in patterns.items():
+                order = [int(c) for c in pattern.decode()]
+                # Byte separation of each probed channel from the reference,
+                # read off the pattern rather than assumed. In pass 1 the probes
+                # are 1, 2 and 3 bytes out; in pass 2 they are 5, 6 and 7.
+                sep = {sc: order.index(dc) - order.index(ref_dlp)
+                       for sc, dc in zip((2, 3, 4), probe_dlp)}
+                if any(v <= 0 for v in sep.values()):
+                    print(f"  {name}: DLP ch{ref_dlp} does not precede every "
+                          f"probed channel in this pattern; skipping")
+                    continue
+                others = sorted(sep, key=lambda c: sep[c])
+                # The reference is always on scope CH1, so that is the trigger.
+                s.trigger_edge(1, level=2.5, slope="POS", mode="SINGLE")
+                by_ch = {c: [] for c in others}
+                misses = 0
+                print(f"  {name} ({pattern.decode()}), reference DLP "
+                      f"ch{ref_dlp} on scope CH1:", flush=True)
+
+                for trial in range(args.trials):
+                    # Fail fast. A configuration that never triggers costs the
+                    # full timeout every trial, and a hundred of those is
+                    # several silent minutes that yield nothing.
+                    if trial == args.probe and misses == trial:
+                        print(f"    aborted: none of the first {trial} trials "
+                              f"triggered. Check the probes and the 2.5 V "
+                              f"level.", flush=True)
+                        break
+                    if args.trials > 20 and trial and trial % 20 == 0:
+                        print(f"    ... {trial}/{args.trials}", flush=True)
+
+                    dlp.low(*CHANNELS)
+                    time.sleep(0.02)
+                    # Arm through apply(), not write(): an unverified setup
+                    # command is silently dropped by this instrument, and a
+                    # dropped arm looks exactly like a signal that never came.
+                    s.apply("TRMD SINGLE", "TRMD?", None)
+                    if not s.wait_armed(timeout=args.trigger_timeout):
+                        misses += 1
+                        continue
+                    dlp._write(pattern)
+                    if not s.wait_stopped(timeout=args.trigger_timeout):
+                        misses += 1
+                        continue
+                    for ch in others:
+                        d = s.delay(1, ch, "FRR")
+                        if d is not None:
+                            by_ch[ch].append(d * 1e6)
+                            rec.row(name, ref_dlp, trial, ch, sep[ch], d * 1e6)
+
+                for ch in others:
+                    v, n = by_ch[ch], sep[ch]
+                    label = f"    +{n} byte{'s' if n > 1 else ' '} (CH{ch}, "\
+                            f"DLP ch{probe_dlp[(2, 3, 4).index(ch)]}):"
+                    print(f"{label}  {describe(v, 'us') if v else 'no measurement'}")
+                if misses:
+                    print(f"    {misses}/{args.trials} trials did not trigger")
+                farthest = others[-1]
+                if by_ch[farthest]:
+                    span = st.median(by_ch[farthest])
+                    per_byte = span / sep[farthest]
+                    print(f"    => {per_byte:.2f} us per byte "
+                          f"(115200 8N1 predicts 86.81)")
+                    if sep[farthest] == 7:
+                        print(f"    => full 8-channel span MEASURED: "
+                              f"{span:.1f} us")
+                    else:
+                        print(f"    => full 8-channel span extrapolated to "
+                              f"{per_byte * 7:.1f} us from {sep[farthest]}-byte "
+                              f"separations")
+            dlp.low(*CHANNELS)
+            print(f"\n  wrote {rec.path}")
+
+
+def block_pulse(args):
+    """Single-line pulse width and its jitter, measured by the scope.
+
+    The question this answers is whether one TTL line on this device is good
+    enough for a system sampling at 1 kHz. Skew does not arise -- a single
+    channel is one command byte -- so what is left is how faithfully a pulse the
+    host asks for appears on the wire.
+
+    Absolute latency is deliberately not claimed. Nothing here shares a clock
+    with the scope, so there is no way to anchor "when the host asked" to "when
+    the edge happened", and any absolute figure would be an assumption dressed
+    up as a measurement. Latency's CONSTANT part can be calibrated out by an
+    experiment anyway; its variable part cannot, and that is what is measured
+    here.
+
+    Two widths are recorded per trial. The host's own busy-wait interval says
+    how well the host placed its two writes; the scope's says what actually
+    reached the wire. If the first is tight and the second is not, the variance
+    is in the USB path rather than in the timing code -- a distinction that
+    decides whether there is anything to fix in software.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from scope import Scope
+
+    with DLPIO8(port=args.port) as dlp, Scope(host=args.scope) as s:
+        print(f"  scope {s.idn}")
+        s.channel(1, on=True, vdiv=1, offset=-2, coupling="D1M")
+        for ch in (2, 3, 4):
+            s.channel(ch, on=False)
+        s.apply("TRDL 0S", "TRDL?", None)
+        s.trigger_edge(1, level=2.5, slope="POS", mode="SINGLE")
+
+        with Recorder(args.out, f"pulse-{args.condition}",
+                      ["condition", "requested_ms", "trial",
+                       "host_width_ms", "scope_width_ms"]) as rec:
+            for width in args.widths:
+                # Put the pulse across about a third of the screen: wide enough
+                # to measure precisely, narrow enough that the whole pulse and
+                # both edges stay inside the record.
+                s.timebase(round(width / 1000 / 4, 9))
+                host_w, scope_w, misses = [], [], 0
+                for trial in range(args.trials):
+                    dlp.low(args.out_ch)
+                    time.sleep(0.02)
+                    s.apply("TRMD SINGLE", "TRMD?", None)
+                    if not s.wait_armed(timeout=args.trigger_timeout):
+                        misses += 1
+                        continue
+                    t0 = time.perf_counter()
+                    dlp.high(args.out_ch)
+                    end = t0 + width / 1000
+                    while time.perf_counter() < end:
+                        pass
+                    dlp.low(args.out_ch)
+                    host_w.append((time.perf_counter() - t0) * 1000)
+                    if not s.wait_stopped(timeout=args.trigger_timeout):
+                        misses += 1
+                        continue
+                    w = s.param(1, "PWID")
+                    if w is not None:
+                        scope_w.append(w * 1000)
+                        rec.row(args.condition, width, trial,
+                                host_w[-1], w * 1000)
+                print(f"\n  requested {width} ms:")
+                print(f"    host busy-wait   {describe(host_w, 'ms')}")
+                print(f"    on the wire      {describe(scope_w, 'ms')}")
+                if scope_w:
+                    err = st.median(scope_w) - width
+                    print(f"    => median error {err:+.4f} ms, "
+                          f"spread {max(scope_w) - min(scope_w):.4f} ms")
+                if misses:
+                    print(f"    {misses}/{args.trials} trials did not trigger")
+            dlp.low(args.out_ch)
+            print(f"\n  wrote {rec.path}")
+
+
 # -------------------------------------------------------------------- main
 
 def main():
@@ -321,6 +527,32 @@ def main():
                        help="write -> detect round trip (needs jumper)")
     s.add_argument("--trials", type=int, default=200)
     s.set_defaults(fn=block_loopback)
+
+    s = sub.add_parser("skew", parents=[common],
+                       help="inter-line skew (needs a scope + probes)")
+    s.add_argument("--trials", type=int, default=100)
+    s.add_argument("--scope", default=None, help="scope IP (default 10.11.13.220)")
+    s.add_argument("--tdiv", type=float, default=200e-6, help="scope s/div")
+    s.add_argument("--pattern", default="both",
+                   choices=["both", "forward", "reverse"])
+    s.add_argument("--trigger-timeout", type=float, default=1.5,
+                   help="seconds to wait for each acquisition")
+    s.add_argument("--probe", type=int, default=3,
+                   help="abort an arm if none of the first N trials trigger")
+    s.add_argument("--probe-map", default="2,3,4",
+                   help="DLP channels on scope CH2,CH3,CH4 (pass 1: 2,3,4; "
+                        "pass 2: 6,7,8)")
+    s.set_defaults(fn=block_skew)
+
+    s = sub.add_parser("pulse", parents=[common],
+                       help="single-line pulse width and jitter (needs scope)")
+    s.add_argument("--trials", type=int, default=50)
+    s.add_argument("--widths", type=float, nargs="+", default=[5, 10, 20, 50])
+    s.add_argument("--scope", default=None, help="scope IP (default 10.11.13.220)")
+    s.add_argument("--condition", default="idle",
+                   help="label for the host condition, recorded in the CSV")
+    s.add_argument("--trigger-timeout", type=float, default=1.5)
+    s.set_defaults(fn=block_pulse)
 
     s = sub.add_parser("discard", parents=[common],
                        help="are queued bytes lost? (needs jumper)")
