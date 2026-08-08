@@ -1,5 +1,5 @@
 # dlp-io8-g
-Python code to control the DLP-IO8-G USB-to-TTL device.
+Code  (in Python and Go) to control the DLP-IO8-G USB-to-TTL device.
 
 ![](dlp-io8-g-800.png)
 
@@ -9,11 +9,102 @@ A full description of the device is available at <http://www.ftdichip.com/Suppor
 
 It can be bought, for example, at [rs-online](https://co-en.rs-online.com/product/dlp-design/dlp-io8-g/70372089/)
 
-## Usage
+Note: DLP design also manufactures modules with with 14 or 20 lines (see <http://www.dlpdesign.com/usb/>)
 
-To run the examples below, install `pyserial` with `pip install pyserial` and check the [#Installation](#installation) section below.
+## Full list of commands
+
+Communication with the DLP is handled by sending commands to a  serial device. 
+
+| ASCII |  Hex | Description       | Return                             |
+|-------|------|-------------------|------------------------------------|
+| 1     | 0x31 | Ch1 Digital Out 1 |                                    |
+| Q     | 0x51 | Ch1 Digital Out 0 |                                    |
+| A     | 0x41 | Ch1 Digital In    | 0 or 1                             |
+| Z     | 0x5A | Ch1 Analog In     | voltage                            |
+| 9     | 0x39 | Ch1 Temperature   |                                    |
+| 2     | 0x32 | Ch2 Digital Out 1 |                                    |
+| W     | 0x57 | Ch2 Digital Out 0 |                                    |
+| S     | 0x53 | Ch2 Digital In    |                                    |
+| X     | 0x58 | Ch2 Analog In     |                                    |
+| 0     | 0x30 | Ch2 Temperature   |                                    |
+| 3     | 0x33 | Ch3 Digital Out 1 |                                    |
+| E     | 0x45 | Ch3 Digital Out 0 |                                    |
+| D     | 0x44 | Ch3 Digital In    |                                    |
+| C     | 0x43 | Ch3 Analog In     |                                    |
+| -     | 0x2D | Ch3 Temperature   |                                    |
+| 4     | 0x34 | Ch4 Digital Out 1 |                                    |
+| R     | 0x52 | Ch4 Digital Out 0 |                                    |
+| F     | 0x46 | Ch4 Digital In    |                                    |
+| V     | 0x56 | Ch4 Analog In     |                                    |
+| =     | 0x3D | Ch4 Temperature   |                                    |
+| 5     | 0x35 | Ch5 Digital Out 1 |                                    |
+| T     | 0x54 | Ch5 Digital Out 0 |                                    |
+| G     | 0x47 | Ch5 Digital In    |                                    |
+| B     | 0x42 | Ch5 Analog In     |                                    |
+| O     | 0x4F | Ch5 Temperature   |                                    |
+| 6     | 0x36 | Ch6 Digital Out 1 |                                    |
+| Y     | 0x59 | Ch6 Digital Out 0 |                                    |
+| H     | 0x48 | Ch6 Digital In    |                                    |
+| N     | 0x4E | Ch6 Analog In     |                                    |
+| P     | 0x50 | Ch6 Temperature   |                                    |
+| 7     | 0x37 | Ch7 Digital Out 1 |                                    |
+| U     | 0x55 | Ch7 Digital Out 0 |                                    |
+| J     | 0x4A | Ch7 Digital In    |                                    |
+| M     | 0x4D | Ch7 Analog In     |                                    |
+| [     | 0x5B | Ch7 Temperature   |                                    |
+| 8     | 0x38 | Ch8 Digital Out 1 |                                    |
+| I     | 0x49 | Ch8 Digital Out 0 |                                    |
+| K     | 0x4B | Ch8 Digital In    |                                    |
+| ,     | 0x2C | Ch8 Analog In     |                                    |
+| ]     | 0x5D | Ch8 Temperature   |                                    |
+| `     | 0x60 | set ASCII mode    |                                    |
+| \     | 0x5C | set BINARY mode   |                                    |
+| L     | 0x4C | set °F            |                                    |
+| ;     | 0x3B | set °C            |                                    |
+| '     | 0x27 | Ping              | Q (0x51) returned if DLP-IO8 is ok |
+
+
+
+## Installation
+
+The DLP-IO8-G relies on the FTDI VCP driver (see <https://ftdichip.com/drivers/vcp-drivers/>).
+
+
+Under Linux, add yourself to the `tty` and `dialup` groups:
+
+    sudo usermod -a -G tty [yourlogin]
+    sudo usermod -a -G dialout [yourlogin]
+
+You may also need to manually load ftdi_sio:
+
+    sudo modprobe ftdi_sio
+
+
+### Determine the serial port under Linux
+
+Once plugged, to determine the serial port the dlp-io8-g is attached to, type the
+command `dmesg` in a Terminal. You should get something like::
+
+
+    [ 5128.109725] usbcore: registered new interface driver usbserial_generic
+    [ 5128.109730] usbserial: USB Serial support registered for generic
+    [ 5128.112142] usbcore: registered new interface driver ftdi_sio
+    [ 5128.112148] usbserial: USB Serial support registered for FTDI USB Serial Device
+    [ 5128.112175] ftdi_sio 1-1:1.0: FTDI USB Serial Device converter detected
+    [ 5128.112190] usb 1-1: Detected FT232RL
+    [ 5128.113130] usb 1-1: FTDI USB Serial Device converter now attached to ttyUSB0
+
+The last line tells you that the device is at `/dev/ttyUSB0`.
+
+
+## Python examples
 
 ### Example 1
+
+To use it under Python, you need to install `pyserial`:
+
+     pip install pyserial
+
 
 The following Python code, switches all data lines to 0, then 1, then  0 again, with half second delays.
 
@@ -30,18 +121,12 @@ The following Python code, switches all data lines to 0, then 1, then  0 again, 
     dlp.write(b'QWERTYUI')  # sets all lines back to '0'
 ```    
 
-The lines do **not** change together. Each command is a single byte, so the eight
-edges are spread over about 610 µs — see [Do not send multi-bit codes to a fast
-sampler](#do-not-send-multi-bit-codes-to-a-fast-sampler) below.
+Note: The lines do **not** change together. Each command is a single byte, so the eight
+edges are spread over about 610 µs (see [`measurements/`](measurements/) and [Do not send multi-bit codes to a fast
+sampler](#do-not-send-multi-bit-codes-to-a-fast-sampler) below.)
 
 ![](scope_4lines_A.jpg)
 
-*(This capture bounds the skew but cannot measure it: at 1.00 ms/div the whole
-screen is 10 ms while the per-byte effect is ~87 µs, under a tenth of a division.
-The 610 µs figure comes from a measurement at 200 µs/div with per-edge readout;
-see [`measurements/`](measurements/).)*
-
-Note: DLP design also manufactures modules with with 14 or 20 lines (see <http://www.dlpdesign.com/usb/>)
 
 
 ### Example 2: Writing on lines 1 to 8
@@ -148,11 +233,9 @@ Here is the result on an oscilloscope:
 ![](triggers-100ms.png)
       
 
-## The same examples in Go
+## Examples in Go
 
-The [`golang/`](golang/) directory holds a package covering the same ground. It
-is not a transliteration of the Python: the byte codes live inside it, so the
-examples below name channels rather than remembering that `Y` lowers line 6.
+The [`golang/`](golang/) directory holds a package covering the same ground. 
 
 The module is called `dlp` rather than a URL, so `go get` will not fetch it.
 Point a module at your working copy:
@@ -162,42 +245,6 @@ go mod edit -require=dlp@v0.0.0 -replace=dlp=/path/to/dlp-io8-g/golang
 go mod tidy
 ```
 
-The timing sections above apply unchanged — same device, same USB path. In
-particular the Go examples get no closer to the hardware than the Python ones
-do, and example 4 needs `chrt -f 50` for the same reason.
-
-### Example 1 in Go: all lines low, high, low
-
-```go
-// Set all eight lines low, then high, then low again.
-package main
-
-import (
-	"log"
-	"time"
-
-	"dlp"
-)
-
-func main() {
-	d, err := dlp.New("") // empty path: find the device by its USB id
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer d.Close()
-
-	all := []int{1, 2, 3, 4, 5, 6, 7, 8}
-	for _, step := range []struct {
-		name string
-		fn   func(...int) error
-	}{{"low", d.Low}, {"high", d.High}, {"low", d.Low}} {
-		if err := step.fn(all...); err != nil {
-			log.Fatalf("setting all lines %s: %v", step.name, err)
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-}
-```
 
 `dlp.New("")` resolves the port through `/dev/serial/by-id/`, which is worth
 preferring to a hardcoded `/dev/ttyUSB0`: any other FTDI instrument competes for
@@ -356,61 +403,6 @@ migrate a goroutine between threads, and in-program elevation raises only the
 calling thread — so without the lock, the goroutine doing the timing is not
 reliably the one you raised.
 
-## Full list of commands:
-
-| ASCII |  Hex | Description       | Return                             |
-|-------|------|-------------------|------------------------------------|
-| 1     | 0x31 | Ch1 Digital Out 1 |                                    |
-| Q     | 0x51 | Ch1 Digital Out 0 |                                    |
-| A     | 0x41 | Ch1 Digital In    | 0 or 1                             |
-| Z     | 0x5A | Ch1 Analog In     | voltage                            |
-| 9     | 0x39 | Ch1 Temperature   |                                    |
-| 2     | 0x32 | Ch2 Digital Out 1 |                                    |
-| W     | 0x57 | Ch2 Digital Out 0 |                                    |
-| S     | 0x53 | Ch2 Digital In    |                                    |
-| X     | 0x58 | Ch2 Analog In     |                                    |
-| 0     | 0x30 | Ch2 Temperature   |                                    |
-| 3     | 0x33 | Ch3 Digital Out 1 |                                    |
-| E     | 0x45 | Ch3 Digital Out 0 |                                    |
-| D     | 0x44 | Ch3 Digital In    |                                    |
-| C     | 0x43 | Ch3 Analog In     |                                    |
-| -     | 0x2D | Ch3 Temperature   |                                    |
-| 4     | 0x34 | Ch4 Digital Out 1 |                                    |
-| R     | 0x52 | Ch4 Digital Out 0 |                                    |
-| F     | 0x46 | Ch4 Digital In    |                                    |
-| V     | 0x56 | Ch4 Analog In     |                                    |
-| =     | 0x3D | Ch4 Temperature   |                                    |
-| 5     | 0x35 | Ch5 Digital Out 1 |                                    |
-| T     | 0x54 | Ch5 Digital Out 0 |                                    |
-| G     | 0x47 | Ch5 Digital In    |                                    |
-| B     | 0x42 | Ch5 Analog In     |                                    |
-| O     | 0x4F | Ch5 Temperature   |                                    |
-| 6     | 0x36 | Ch6 Digital Out 1 |                                    |
-| Y     | 0x59 | Ch6 Digital Out 0 |                                    |
-| H     | 0x48 | Ch6 Digital In    |                                    |
-| N     | 0x4E | Ch6 Analog In     |                                    |
-| P     | 0x50 | Ch6 Temperature   |                                    |
-| 7     | 0x37 | Ch7 Digital Out 1 |                                    |
-| U     | 0x55 | Ch7 Digital Out 0 |                                    |
-| J     | 0x4A | Ch7 Digital In    |                                    |
-| M     | 0x4D | Ch7 Analog In     |                                    |
-| [     | 0x5B | Ch7 Temperature   |                                    |
-| 8     | 0x38 | Ch8 Digital Out 1 |                                    |
-| I     | 0x49 | Ch8 Digital Out 0 |                                    |
-| K     | 0x4B | Ch8 Digital In    |                                    |
-| ,     | 0x2C | Ch8 Analog In     |                                    |
-| ]     | 0x5D | Ch8 Temperature   |                                    |
-| `     | 0x60 | set ASCII mode    |                                    |
-| \     | 0x5C | set BINARY mode   |                                    |
-| L     | 0x4C | set °F            |                                    |
-| ;     | 0x3B | set °C            |                                    |
-| '     | 0x27 | Ping              | Q (0x51) returned if DLP-IO8 is ok |
-
-
-
-A full description of the device is available at <http://www.ftdichip.com/Support/Documents/DataSheets/DLP/dlp-io8-ds-v15.pdf>
-
-
 
 ## Timing: two things to do before collecting data on Linux
 
@@ -565,39 +557,5 @@ never sent.
 Use **one line per event type, pulsed**: a single command byte, no skew at all,
 and eight lines still distinguish eight event types.
 
-## Installation
-
-The DLP-IO8-G relies on the FTDI VCP driver (see <https://ftdichip.com/drivers/vcp-drivers/>).
-
-## Determine the serial port under Linux
-
-Once plugged, to determine the serial port the dlp-io8-g is attached to, type the
-command `dmesg` in a Terminal. You should get something like::
-
-
-    [ 5128.109725] usbcore: registered new interface driver usbserial_generic
-    [ 5128.109730] usbserial: USB Serial support registered for generic
-    [ 5128.112142] usbcore: registered new interface driver ftdi_sio
-    [ 5128.112148] usbserial: USB Serial support registered for FTDI USB Serial Device
-    [ 5128.112175] ftdi_sio 1-1:1.0: FTDI USB Serial Device converter detected
-    [ 5128.112190] usb 1-1: Detected FT232RL
-    [ 5128.113130] usb 1-1: FTDI USB Serial Device converter now attached to ttyUSB0
-
-The last line tells you that the device is at `/dev/ttyUSB0`.
-
-If you do not see this line, you may need to manually load ftdi_sio:
-
-    sudo modprobe ftdi_sio
-    sudo dmesg
-
-Under Linux, add yourself to the `tty` and `dialup` groups:
-
-    sudo usermod -a -G tty [yourlogin]
-    sudo usermod -a -G dialout [yourlogin]
-
-
-To use it under Python, you need to install `pyserial`:
-
-     pip install pyserial
 
 
