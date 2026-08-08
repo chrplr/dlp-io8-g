@@ -6,3 +6,7 @@ DebugErc.log
 
 # Editor backups
 *~
+
+# Go binaries built in the measurements tree
+/measurements/roundtrip
+/measurements/pulsetrain

@@ -1,0 +1,6 @@
+github.com/chrplr/dlpio8 v0.1.0 h1:uv64A+gnENvkIx6K0kUufbzGp5Ktpjg1RuOVrNhoTBY=
+github.com/chrplr/dlpio8 v0.1.0/go.mod h1:sogwhxf0rNsYP4N0eew8iSIUwVVDNk5BN4p2Gh0xx7M=
+go.bug.st/serial v1.8.0 h1:ZtnmN8aYXtPlTghwSvDWPHKBHL9TM6oFDa+KpSn4SQE=
+go.bug.st/serial v1.8.0/go.mod h1:d0MmS16Qt9b1m06yoYRNUXhRRTJV5Qg2S5EKqQtnayQ=
+golang.org/x/sys v0.43.0 h1:Rlag2XtaFTxp19wS8MXlJwTvoh8ArU6ezoyFsMyCTNI=
+golang.org/x/sys v0.43.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=

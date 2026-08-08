@@ -17,6 +17,20 @@ Host: `is158520`, Linux, `ftdi_sio` VCP driver. Session 2026-08-07.
 ./dlp_timing.py <block> --help
 ```
 
+Two of these have Go counterparts, built on the published
+[dlpio8](https://github.com/chrplr/dlpio8) module rather than on the Python
+client here. They exist to exercise that module on the same rig, and because the
+second measures something the Python blocks do not:
+
+```bash
+cd measurements && go build ./...
+
+sudo ./roundtrip -trials 300 -out <dir>          # ch1 -> ch2 jumper, sweeps the timer
+./ad3-capture.py --seconds 150 --out cap.npz &   # started first, outlives the emitter
+chrt -f 50 ./pulsetrain -trials 1000 -condition rt -out train.csv
+./analyse-pulsetrain.py train.csv cap.npz --out paired.csv
+```
+
 The loopback blocks need one jumper, ch1 to ch8; both channels are on the same
 board so the ground is already common. Remove that jumper before probing ch8
 with the scope, or ch1 and ch8 are shorted and their skew reads zero for a
@@ -100,6 +114,23 @@ This bounds the write path plus the read path together. It cannot separate them,
 and neither can anything else here: **the module has no clock**, so there is no
 second timestamp to difference against. Splitting this figure, or getting an
 absolute host-to-edge latency at all, needs an oscilloscope or a BBTK.
+
+`cmd/roundtrip` is a Go port of this block, over a ch1 → ch2 jumper, writing
+`roundtrip-go-lt*.csv` with the same columns. At `latency_timer` 1 ms it gives a
+median of **0.993 ms, n=300**, against the Python's 0.996 ms at n=200 above.
+
+That agreement is worth exactly what it is and no more: the two implementations
+run the same method against the same device over the same USB path, so it
+corroborates the Go client and the port, not the physics. It is not two
+independent routes to the same quantity. What it does rule out is a systematic
+error introduced by the client library — a spurious flush, a mis-set line
+discipline, an extra round trip per read — since either implementation having
+one would separate them.
+
+Unlike the Python block, it sweeps the timer in one run, which needs root to
+write sysfs. It probes for that before measuring anything, so a run without
+`sudo` fails immediately rather than collecting whichever setting the machine
+happened to be in and labelling the rest with settings it never applied.
 
 ## Discarding queued output: hypothesis not supported
 
@@ -438,6 +469,65 @@ triggers whatsoever reach the amplifier.** In a recording session that is a full
 data set with no usable event markers, discovered afterwards. A check that
 observes the line electrically — the box's own D30 → D22 loopback, where it
 fails to see its own edge — is the one that catches this.
+
+## Pulse width against request, by regression — not yet collected
+
+`cmd/pulsetrain` + `ad3-capture.py` + `analyse-pulsetrain.py` measure something
+the `pulse` and `pulse-stream` blocks do not. Those step through a handful of
+fixed widths and summarise each; this samples widths uniformly on [5, 50] ms and
+inter-pulse intervals uniformly on [10, 100] ms, and fits
+
+    measured_width = intercept + slope * target_width
+
+The fixed-width blocks can say the median error at 10 ms and at 50 ms. They
+cannot cleanly separate a proportional loss from a fixed per-pulse overhead,
+because with the interval held constant any drift across the run — thermal,
+scheduling, anything monotonic — enters as a slope against width. Randomising
+both decorrelates width from when the trial happened, so the slope is
+attributable to width. It also makes the width sequence a signature: the
+analysis aligns emitter to capture by sliding for minimum RMS, and a wrong
+pairing fails loudly instead of biasing the fit quietly.
+
+**No data has been collected with it yet.** The tools are verified — the
+emitter against the device, the analysis against synthetic captures with known
+slope and intercept, injected values recovered to 4 decimal places — but nothing
+has been run past an AD3. Running it needs the AD3 on ch1 and about three
+minutes:
+
+```bash
+./ad3-capture.py --seconds 150 --out cap.npz &
+chrt -f 50 ./pulsetrain -trials 1000 -condition rt -out train.csv
+./analyse-pulsetrain.py train.csv cap.npz --out paired.csv
+```
+
+Three fits come out, and the comparison between them is the point.
+`measured ~ target` is the device and the link; `host ~ target` is what this
+process's own clock saw between its two writes; `measured ~ host` is what the
+device and USB added to the host's view. Both poor in the same way means the
+host was descheduled and the device is not at fault; only the first poor means
+it is.
+
+One asymmetry to expect in `host ~ target`, already measured: the busy-wait
+deadline is anchored *before* the first write, so both edges carry the same
+host-to-wire latency and it cancels out of the electrical width — but the host's
+own figure includes the second write's return, which ran **20.5 µs median (p95
+28.5, max 87), n=40, idle**. So a small positive intercept on `host ~ target`
+with none on `measured ~ target` is the expected shape, not a fault.
+
+## Emitting and capturing in separate processes
+
+`pulse-stream` fires each trial from inside the loop draining the instrument,
+through `ad3.record`'s `on_tick`. That couples them: the busy-wait timing the
+pulse also stalls the drain, and the device's 16384-sample buffer is only
+16 ms at 1 MS/s, so a 50 ms pulse overruns it and loses samples exactly where
+the falling edge is. Hence that block's refusal to run fast when the widths are
+long, and its 250 kS/s default.
+
+`pulsetrain` is a separate process from `ad3-capture.py`, so the drain loop is
+never held by anything. That removes the constraint rather than working around
+it: the capture runs at 1 MS/s for ~1 µs edge resolution regardless of pulse
+width. The cost is that the two have to be paired afterwards instead of being
+counted in lockstep, which is what the alignment step is for.
 
 ## A note on the file schemas
 
