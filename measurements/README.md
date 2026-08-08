@@ -381,8 +381,8 @@ single trigger on a wire the two are interchangeable, and the choice between the
 must be made on the pulse-width and skew behaviour below, which differ by
 hundreds of times more.
 
-Measuring it properly needs what the [main README](../README.md#measuring-it-properly)
-describes: an event the host can produce at a time it knows exactly, on the same
+Measuring it properly needs what the
+[main README](../README.md#why-no-absolute-latency-is-quoted-here) describes: an event the host can produce at a time it knows exactly, on the same
 instrument. Two devices behind two independent USB stacks cannot be separated by
 a better estimator.
 
