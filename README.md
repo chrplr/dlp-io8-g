@@ -315,13 +315,22 @@ must not exceed the granted value, or it fails with "Operation not permitted".
 
 **Do not combine `chrt` with a loop that busy-waits continuously.** The kernel
 throttles real-time tasks: `sched_rt_runtime_us` is 950000 of a 1000000 period
-by default, so a `SCHED_FIFO` process that never yields is *suspended for 50 ms
-once a second*. An experiment that spins through its inter-trial intervals as
-well as its pulses sits at 100% duty and collects that stall in the middle of
-whatever it was timing. Measured, spinning the gaps at `chrt -f 50`: 23 of 1000
-trials hit, worst pulse-width error **49.63 ms**, the hits landing on
-one-second boundaries — comfortably worse than the millisecond of scheduling
-jitter real-time priority was bought to avoid.
+by default, so a `SCHED_FIFO` process that never yields can be *suspended for
+50 ms once a second*. An experiment that spins through its inter-trial
+intervals as well as its pulses sits at 100% duty and collects that stall in
+the middle of whatever it was timing. Measured, spinning the gaps at
+`chrt -f 50`: 23 of 1000 trials hit, worst pulse-width error **49.63 ms**, the
+hits landing on one-second boundaries — comfortably worse than the millisecond
+of scheduling jitter real-time priority was bought to avoid.
+
+**It only fires when the machine is otherwise busy**, which is the worst way
+for a hazard to behave. Measured on this 22-core host with a pinned
+`SCHED_FIFO 50` thread spinning continuously: **0 stalls in 20 s idle**, and
+**24 stalls in 25 s under `stress-ng`** — 51.0 ms each, at 0.999, 2.000, 3.001,
+4.002 s and so on, one per second exactly. On an idle runqueue the kernel
+borrows unused real-time bandwidth from the other CPUs and never throttles. So
+the fault is invisible on a quiet development machine and appears on a loaded
+one, which is to say on the machine you actually run participants on.
 
 Sleep between trials and spin only the last fraction of a millisecond before
 each edge. That keeps the duty cycle low enough that the throttle never fires,

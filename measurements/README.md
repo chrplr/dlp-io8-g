@@ -577,11 +577,23 @@ n=1000 and an interval estimate.
 The first `rt` run came out *worse* than the unprivileged one: alignment RMS
 5.66 ms, and a maximum host-side width error of **49.63 ms**. The cause is the
 kernel's real-time throttle. `sched_rt_runtime_us` is 950000 of a 1000000
-period, so a SCHED_FIFO task at 100% duty is suspended for 50 ms once a second —
-and the emitter was spinning through the inter-pulse gaps as well as the pulses,
-so it was at 100% duty for the whole 85 s run. 23 of 1000 trials were hit, the
-biggest error one millisecond short of the full throttle window, and the hits
-land on one-second boundaries.
+period, so a SCHED_FIFO task at 100% duty can be suspended for 50 ms once a
+second — and the emitter was spinning through the inter-pulse gaps as well as
+the pulses, so it was at 100% duty for the whole 85 s run. 23 of 1000 trials
+were hit, the biggest error one millisecond short of the full throttle window,
+and the hits land on one-second boundaries.
+
+**Load is a necessary condition, and that was not obvious.** Isolating the
+mechanism afterwards with a bare spinner rather than the emitter: a pinned
+`SCHED_FIFO 50` thread spinning continuously took **0 stalls in 20 s on an idle
+machine**, and **24 stalls in 25 s under `stress-ng --cpu 20`** — 51.0 ms each,
+at 0.999, 2.000, 3.001, 4.002 s, one per second exactly. Unpinned under the same
+load it took 8 irregular stalls of 6–41 ms, since it migrates between runqueues
+and hits the limit less consistently. On an idle runqueue the kernel borrows
+unused real-time bandwidth from other CPUs and the limit is never reached. The
+rt run above was loaded, so the original observation stands — but a version of
+this warning that omits the load condition would send someone to test on a quiet
+machine and conclude there is no problem.
 
 `pulsetrain` now sleeps the gap and spins only its last 200 µs, which drops the
 duty cycle to about a third and takes it clear of the throttle. The raw evidence
@@ -589,8 +601,17 @@ is kept in `pulsetrain-rt-throttled.csv`.
 
 The general lesson is not about this tool: **`chrt -f` plus a busy-wait that
 never yields is a trap.** Raising priority to protect timing, and then holding
-the CPU continuously, buys a 50 ms stall every second — far worse than the
-scheduling jitter it was meant to avoid.
+the CPU continuously, buys a 50 ms stall every second on a busy host — far worse
+than the scheduling jitter it was meant to avoid.
+
+What the throttle does *not* appear to do is spread to other real-time tasks.
+An RR 20 thread imitating an audio server's data loop (5 ms period) was run on
+the same CPU as a `SCHED_FIFO 50` spinner in conditions where that spinner was
+demonstrably being throttled: worst wakeup lateness **1.114 ms**, against
+1.013 ms for the same thread with no spinner present. The co-located real-time
+thread was not caught. That is a measurement, not an explanation — the
+mechanism for why it escapes was not established — but on this host a spinning
+real-time experiment did not degrade an audio-priority neighbour.
 
 ### An expected asymmetry that is not a fault
 

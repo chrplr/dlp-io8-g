@@ -203,13 +203,19 @@ func run(port, out string, channel, trials int, widthRange, isiRange string,
 		// measured quantity and is spun in full, but spinning the gap too would
 		// hold the CPU for the whole run — and at SCHED_FIFO that trips the
 		// kernel's real-time throttle. sched_rt_runtime_us defaults to 950000
-		// of a 1000000 period, so a task at 100% duty is stopped for 50 ms
+		// of a 1000000 period, so a task at 100% duty can be stopped for 50 ms
 		// about once a second, landing in whatever pulse is in progress.
 		//
 		// Measured, before this was fixed: 23 of 1000 trials hit, biggest width
 		// error 49.63 ms against a 50 ms throttle window, the hits falling on
 		// one-second boundaries. Real-time priority came out worse than normal
 		// priority, which is the exact opposite of the reason for using it.
+		//
+		// The throttle needs the host to be busy as well. A bare pinned
+		// SCHED_FIFO 50 spinner took 0 stalls in 20 s on an idle machine and 24
+		// in 25 s under load; an idle runqueue borrows unused real-time
+		// bandwidth from other CPUs and never reaches the limit. Both runs
+		// above were loaded.
 		end := time.Now().Add(time.Duration(plan[i].isi * float64(time.Millisecond)))
 		if rest := time.Until(end) - spinTail; rest > 0 {
 			time.Sleep(rest)
