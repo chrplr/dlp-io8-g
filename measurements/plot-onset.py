@@ -15,6 +15,12 @@ averaging. Nothing here is averaged: a pointwise mean of onset-jittered traces
 has a rise several times longer than any individual trial, which would misread
 as a slow display.
 
+Edges come from the capture's rise_ch1 if it has one and are detected here
+otherwise, so a raw-only .npz saved by some other harness still plots. The
+crossings are always found at the full sample rate; only the drawing is
+decimated, because six hundred trials at 1 MS/s is fifty million points and
+matplotlib will not thank you for them.
+
 The rug beneath the traces marks each trial's own 10% crossing, so the jitter is
 visible as a distribution and not only as a fan of curves.
 """
@@ -23,6 +29,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 
 SURFACE, INK, INK2, MUTED = "#fcfcfb", "#0b0b0b", "#52514e", "#8a8985"
 TTL_C, TRIAL_C = "#2a78d6", "#9c9b97"
@@ -37,7 +44,14 @@ try:
 except KeyError:
     sys.exit("this capture has no raw samples: re-run ad3-capture.py with "
              "--channels 1,2 --save-raw")
-edges = z["rise_ch1"]
+if "rise_ch1" in z.files:
+    edges = z["rise_ch1"]
+else:
+    # No precomputed edges: find them on CH1 at the midpoint of its own
+    # 1st..99th percentile band, the same rule ad3-capture.py uses by default.
+    lo, hi = np.percentile(ttl[::97], (1, 99))
+    above = ttl >= lo + 0.5 * (hi - lo)
+    edges = np.flatnonzero(above[1:] & ~above[:-1]) / rate
 
 PRE, POST = int(0.008 * rate), int(0.075 * rate)
 trials, ttls, t10s = [], [], []
@@ -66,18 +80,25 @@ for s in ("top", "right"): ax.spines[s].set_visible(False)
 for s in ("left", "bottom"): ax.spines[s].set_color("#d6d5d1")
 ax.tick_params(colors=INK2, labelsize=9)
 
-for tr in trials:
-    ax.plot(t, tr, color=TRIAL_C, lw=0.9, zorder=1)
-ax.plot(t, np.median(np.array(ttls), axis=0), color=TTL_C, lw=2, zorder=3,
-        label="DLP-IO8 TTL trigger")
+# One LineCollection of decimated traces rather than n Line2Ds of every
+# sample. Peak-preserving is not needed: these are slow optical ramps, not
+# something with structure between samples.
+step = max(1, len(t) // 2000)
+alpha = 0.9 if n <= 40 else max(0.06, 6.0 / n)
+ax.add_collection(LineCollection(
+    [np.column_stack((t[::step], tr[::step])) for tr in trials],
+    colors=TRIAL_C, linewidths=0.9, alpha=alpha, zorder=1))
+ax.plot(t[::step], np.median(np.array(ttls), axis=0)[::step], color=TTL_C, lw=2,
+        zorder=3, label="DLP-IO8 TTL trigger")
 ax.plot([], [], color=TRIAL_C, lw=1.4, label=f"photodiode, {n} individual trials")
 ax.axvline(0, color=MUTED, lw=1, ls=(0, (4, 3)), zorder=0)
 
 # A rug of each trial's 10% crossing, directly under the traces: the jitter as
 # a distribution rather than only as a fan of curves.
 y0 = -0.55
-for v in t10s:
-    ax.plot([v, v], [y0, y0 + 0.30], color=TRIAL_C, lw=1.1, solid_capstyle="butt", zorder=2)
+ax.add_collection(LineCollection(
+    [[(v, y0), (v, y0 + 0.30)] for v in t10s], colors=TRIAL_C,
+    linewidths=1.1, alpha=1.0 if n <= 40 else 0.25, zorder=2))
 ax.annotate("", xy=(t10s.min(), y0 - 0.22), xytext=(t10s.max(), y0 - 0.22),
             arrowprops=dict(arrowstyle="<->", color=INK, lw=1.3))
 ax.text((t10s.min() + t10s.max()) / 2, y0 - 0.95,
