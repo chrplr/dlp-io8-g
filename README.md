@@ -250,6 +250,30 @@ go mod tidy
 preferring to a hardcoded `/dev/ttyUSB0`: any other FTDI instrument competes for
 that name and which one wins depends on plug order.
 
+### The `dlpio8` command
+
+[`golang/cmd/dlpio8`](golang/cmd/dlpio8) is a command-line front end to the
+package, for checking wiring and watching lines without writing a program:
+
+```bash
+cd golang && go build ./cmd/dlpio8
+
+./dlpio8 ports                                  # what is attached, and which port we would pick
+./dlpio8 read                                   # all 8 inputs, once a second
+./dlpio8 read -channels 1 -interval 0 -changes  # line 1, polled flat out, printing only changes
+./dlpio8 write -high 1,3 -low 2                 # set some outputs and exit
+./dlpio8 write -mask 0x5a                       # all eight from a bitmask (still not atomic)
+./dlpio8 pulse -channels 1 -width 10ms -count 5 -period 1s
+./dlpio8 blink -period 5s                       # alternate all 8, for a scope or a logic probe
+```
+
+`read` writes one line per sample to stdout — seconds since start, then one 0/1
+per channel — with the connection details on stderr, so redirecting stdout gives
+a data file and still shows what it was recorded from. Every subcommand takes
+`-port` to override the USB-id lookup and `-latency-timer` to set the FTDI
+timer, which is reported at startup either way because it sets the ceiling on
+the polling rate.
+
 ### Example 2 in Go: writing on lines 1 to 4
 
 ```go
