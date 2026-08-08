@@ -4,7 +4,9 @@ Raw data and reproduction instructions. Every figure here is measured on
 hardware; anything not measured says so.
 
 Device: DLP-IO8-G, FT232RL, 115200 8N1, `usb-DLP_Design_DLP-IO8_12345678`.
-Host: `is158520`, Linux, `ftdi_sio` VCP driver. Session 2026-08-07.
+Host: `is158520`, Linux, `ftdi_sio` VCP driver, 22 cores. Sessions
+2026-08-07 (Python, `2026-08-07-dlp/`) and 2026-08-08 (Go, on the published
+`dlpio8` module, `2026-08-08-dlp-go/`).
 
 ```bash
 ./dlp_timing.py poll     --out <dir> --latency-timer 1   # no wiring
@@ -57,7 +59,14 @@ iteration, and if that work allocates, the interpreter is doing memory
 management inside the window where the on-board buffer is filling. Captures at
 1 MS/s lost a buffer even at real-time priority, where scheduling cannot be the
 cause. `ad3.py` preallocates its output for that reason, and the streaming blocks
-default to 250 kS/s. Every block aborts rather than writing a file if the SDK
+default to 250 kS/s.
+
+That ceiling is a property of firing trials from inside the drain loop, not of
+the rate. A capture that only drains ran **120 s at 1 MS/s with zero lost and
+zero corrupted samples** (2026-08-08, 120 M samples, one channel). Under
+`stress-ng` on every core it did lose samples at that rate, and refused to write
+the file; reserving one core for the capture and dropping to 250 kS/s held it to
+zero across all three loaded runs. Every block aborts rather than writing a file if the SDK
 reports any lost or corrupted samples: a capture with holes has them wherever the
 host was busiest, which is exactly where the interesting trials are.
 
@@ -470,7 +479,7 @@ data set with no usable event markers, discovered afterwards. A check that
 observes the line electrically — the box's own D30 → D22 loopback, where it
 fails to see its own edge — is the one that catches this.
 
-## Pulse width against request, by regression — not yet collected
+## Pulse width against request, by regression
 
 `cmd/pulsetrain` + `ad3-capture.py` + `analyse-pulsetrain.py` measure something
 the `pulse` and `pulse-stream` blocks do not. Those step through a handful of
@@ -488,31 +497,82 @@ attributable to width. It also makes the width sequence a signature: the
 analysis aligns emitter to capture by sliding for minimum RMS, and a wrong
 pairing fails loudly instead of biasing the fit quietly.
 
-**No data has been collected with it yet.** The tools are verified — the
-emitter against the device, the analysis against synthetic captures with known
-slope and intercept, injected values recovered to 4 decimal places — but nothing
-has been run past an AD3. Running it needs the AD3 on ch1 and about three
-minutes:
+Collected 2026-08-08, n=1000 per condition, AD3 on ch1 at 250 kS/s with zero
+lost or corrupted samples in every run. Widths uniform on [5, 50] ms, intervals
+uniform on [10, 100] ms, seed 20260808 — the same seed in all three, so the
+conditions see an identical pulse sequence.
 
-```bash
-./ad3-capture.py --seconds 150 --out cap.npz &
-chrt -f 50 ./pulsetrain -trials 1000 -condition rt -out train.csv
-./analyse-pulsetrain.py train.csv cap.npz --out paired.csv
-```
+| condition | slope | intercept | residual SD | max abs error |
+|---|---|---|---|---|
+| idle | 0.99985 ± 0.00006 | +0.0012 ± 0.0017 ms | **23 µs** | 0.35 ms |
+| load (`stress-ng`) | 1.00110 ± 0.00246 | +0.7275 ± 0.0740 ms | **995 µs** | 5.04 ms |
+| load + `chrt -f 50` | 1.00004 ± 0.00027 | −0.0036 ± 0.0080 ms | **108 µs** | 1.81 ms |
 
-Three fits come out, and the comparison between them is the point.
-`measured ~ target` is the device and the link; `host ~ target` is what this
-process's own clock saw between its two writes; `measured ~ host` is what the
-device and USB added to the host's view. Both poor in the same way means the
-host was descheduled and the device is not at fault; only the first poor means
-it is.
+**The slope is 1 in every condition.** Load costs a fixed +0.73 ms offset and a
+heavy tail; it does not scale with the width requested. That is what the
+fixed-width table above could not settle: its +1.33 ms at 5 ms and +1.85 ms at
+10 ms against −20 µs at 20 ms and −10 µs at 50 ms look like a width-dependent
+effect, and at n=50 per width they are not — they are sampling noise on a
+heavy-tailed distribution. Split the n=1000 load run into width quartiles and
+the p95 error is flat at 2.6–2.8 ms across all four.
 
-One asymmetry to expect in `host ~ target`, already measured: the busy-wait
-deadline is anchored *before* the first write, so both edges carry the same
-host-to-wire latency and it cancels out of the electrical width — but the host's
-own figure includes the second write's return, which ran **20.5 µs median (p95
-28.5, max 87), n=40, idle**. So a small positive intercept on `host ~ target`
-with none on `measured ~ target` is the expected shape, not a fault.
+The one thing that does vary with width is the *median* error under load, which
+falls from +0.33 ms in the shortest quartile to +0.06 ms in the longest. That is
+compatible with a slope of 1: OLS fits the mean, and the mean is set by the tail,
+which is flat. Characterising the median trend properly needs quantile
+regression, and this data has not been used for that. **The mechanism is not
+established here** — a candidate is that the width error is the difference
+between two preemption delays, one before each write, but nothing in these runs
+distinguishes that from the alternatives.
+
+**Real-time priority recovers a factor of 9 in residual SD** (995 → 108 µs) and
+returns the intercept to zero, under load that otherwise costs three quarters of
+a millisecond on every pulse.
+
+### The device is not what degrades, by regression this time
+
+Fit the measured width on the *host's own* busy-wait interval instead of on the
+target, under load:
+
+| under load | residual SD |
+|---|---|
+| measured ~ target | 995 µs |
+| measured ~ host | **188 µs** |
+
+The wire tracks the host's own clock five times more closely than it tracks what
+the host meant to do. The host's timing loop is preempted, the second write goes
+out late, and the module faithfully reproduces the mistake. This is the same
+conclusion the four-row scope table reached by comparing two columns, now with
+n=1000 and an interval estimate.
+
+### Busy-waiting the gaps makes `chrt` worse, not better
+
+The first `rt` run came out *worse* than the unprivileged one: alignment RMS
+5.66 ms, and a maximum host-side width error of **49.63 ms**. The cause is the
+kernel's real-time throttle. `sched_rt_runtime_us` is 950000 of a 1000000
+period, so a SCHED_FIFO task at 100% duty is suspended for 50 ms once a second —
+and the emitter was spinning through the inter-pulse gaps as well as the pulses,
+so it was at 100% duty for the whole 85 s run. 23 of 1000 trials were hit, the
+biggest error one millisecond short of the full throttle window, and the hits
+land on one-second boundaries.
+
+`pulsetrain` now sleeps the gap and spins only its last 200 µs, which drops the
+duty cycle to about a third and takes it clear of the throttle. The raw evidence
+is kept in `pulsetrain-rt-throttled.csv`.
+
+The general lesson is not about this tool: **`chrt -f` plus a busy-wait that
+never yields is a trap.** Raising priority to protect timing, and then holding
+the CPU continuously, buys a 50 ms stall every second — far worse than the
+scheduling jitter it was meant to avoid.
+
+### An expected asymmetry that is not a fault
+
+`host ~ target` has a small positive intercept in every condition (+10.8 µs
+idle) where `measured ~ target` has none. The busy-wait deadline is anchored
+*before* the first write, so both edges carry the same host-to-wire latency and
+it cancels out of the electrical width, while the host's own figure additionally
+includes the second write's return. The mirror image shows up as the −9.6 µs
+intercept of `measured ~ host`. This is the arrangement working, not an error.
 
 ## Emitting and capturing in separate processes
 
@@ -530,6 +590,19 @@ width. The cost is that the two have to be paired afterwards instead of being
 counted in lockstep, which is what the alignment step is for.
 
 ## A note on the file schemas
+
+`2026-08-08-dlp-go/` holds the Go session. `roundtrip-go-lt1.csv` carries the
+same columns as the Python `loopback-*.csv`. `pulsetrain-<condition>.csv` is the
+emitter's own log — what it asked for and what its clock saw — and
+`pulsetrain-paired-<condition>.csv` adds the instrument's width and the fit
+residual per trial, after alignment. `pulsetrain-edges-<condition>.npz` is the
+raw AD3 output: threshold crossing times only, since the samples themselves are
+180 MB per run and nothing downstream reads them.
+
+`pulsetrain-rt-throttled.csv` is a failed run kept on purpose — the emitter at
+SCHED_FIFO with a 100% duty busy-wait, hitting the kernel real-time throttle. It
+has no paired file because the analysis refused to align it, which is the
+behaviour being demonstrated.
 
 `pulse-dlp-*.csv` were recorded before the block gained a `--device` column and
 so lack it; `pulse-ttlbox-*.csv` and everything later carry it. The DLP files

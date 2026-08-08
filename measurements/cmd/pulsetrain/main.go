@@ -176,9 +176,10 @@ func run(port, out string, channel, trials int, widthRange, isiRange string,
 		// width equal the target; anchoring after the write would make it the
 		// target plus however long that write took to return. The consequence
 		// is that host_width_ms below reads slightly high, by the Low write's
-		// own return — measured at 20.5 µs median, n=40, on an idle host, with
-		// a p95 of 28.5 µs and one excursion to 87 µs — while the width the
-		// instrument sees should not carry that offset.
+		// own return, while the width the instrument sees does not. Measured
+		// against an AD3, n=1000, idle: host_width sits +10.8 µs on target as a
+		// regression intercept (median +6.3 µs, p95 +21.9 µs), and the measured
+		// width shows no such offset.
 		deadline := onset.Add(width)
 		for time.Now().Before(deadline) {
 		}
@@ -198,8 +199,22 @@ func run(port, out string, channel, trials int, widthRange, isiRange string,
 			return err
 		}
 
-		gap := time.Duration(plan[i].isi * float64(time.Millisecond))
-		for end := time.Now().Add(gap); time.Now().Before(end); {
+		// Sleep the gap; spin only the last spinTail of it. The width is the
+		// measured quantity and is spun in full, but spinning the gap too would
+		// hold the CPU for the whole run — and at SCHED_FIFO that trips the
+		// kernel's real-time throttle. sched_rt_runtime_us defaults to 950000
+		// of a 1000000 period, so a task at 100% duty is stopped for 50 ms
+		// about once a second, landing in whatever pulse is in progress.
+		//
+		// Measured, before this was fixed: 23 of 1000 trials hit, biggest width
+		// error 49.63 ms against a 50 ms throttle window, the hits falling on
+		// one-second boundaries. Real-time priority came out worse than normal
+		// priority, which is the exact opposite of the reason for using it.
+		end := time.Now().Add(time.Duration(plan[i].isi * float64(time.Millisecond)))
+		if rest := time.Until(end) - spinTail; rest > 0 {
+			time.Sleep(rest)
+		}
+		for time.Now().Before(end) {
 		}
 		if (i+1)%100 == 0 {
 			fmt.Printf("\r  %d/%d", i+1, trials)
@@ -215,6 +230,11 @@ func run(port, out string, channel, trials int, widthRange, isiRange string,
 	fmt.Printf("\n  stop the capture, then:\n    ./analyse-pulsetrain.py %s <capture.npz>\n", out)
 	return nil
 }
+
+// spinTail is how much of each inter-pulse gap is spun rather than slept, to
+// absorb the sleep's own overshoot without running at a duty cycle the
+// real-time throttle would notice.
+const spinTail = 200 * time.Microsecond
 
 type trial struct {
 	width float64 // ms
