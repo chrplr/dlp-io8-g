@@ -39,21 +39,110 @@ def _check(ok, what):
         raise AD3Error(f"{what}: {err.value.decode().strip()}")
 
 
-class AD3:
-    """An open connection to an Analog Discovery 3."""
+def _per_channel(value, channels, what):
+    """Accept a scalar for every channel, or a dict of per-channel values."""
+    if isinstance(value, dict):
+        missing = [c for c in channels if c not in value]
+        if missing:
+            raise ValueError(f"{what}: no value for channel(s) {missing}")
+        return {c: float(value[c]) for c in channels}
+    return {c: float(value) for c in channels}
 
-    def __init__(self, channels=(0, 1), rate=1e6):
+
+class AD3:
+    """An open connection to an Analog Discovery 3.
+
+    range_v, offset_v and attenuation are each either one value for every
+    channel or a dict keyed by channel index, because the two inputs rarely
+    want the same settings: a 0-5 V logic line and a 9 V-powered photodiode
+    through a 10x probe do not share a window.
+
+    With attenuation set, range_v and offset_v are measured AT THE PROBE, not
+    at the device input. A 10x probe therefore has only two usable ranges, 50 V
+    and 500 V, because the input's own 5 V and 50 V are multiplied by ten. Ask
+    for 5 V through a 10x probe and the device cannot comply; it applies about
+    51 V and this constructor says so rather than letting the conversion be
+    wrong by an order of magnitude.
+
+    # The device substitutes ranges, quietly
+
+    An AD3 offers two input ranges, nominally 5 V and 50 V, and silently picks
+    the nearest one it can honour. Ask for 10 V and it applies about 58.6 V
+    without complaining. Anything that then converts counts to volts using the
+    number it *asked* for is wrong by that factor -- five point nine, in that
+    example, which is more than enough to make a 5 V logic signal look like
+    0.87 V and send you hunting for a wiring fault that is not there.
+
+    So this reads the applied range and offset back from the device, converts
+    with those, and refuses to continue if the substitution was large. Pass
+    allow_range_substitution=True to accept it deliberately; the applied values
+    are then in self.range_v and self.offset_v, and in record()'s stats.
+
+    Requesting an offset the chosen range cannot reach forces a substitution
+    too: a 5 V window cannot be centred at 5.75 V, so asking for that gets the
+    50 V range even though the range itself looked fine.
+    """
+
+    def __init__(self, channels=(0, 1), rate=1e6, range_v=RANGE_V,
+                 offset_v=OFFSET_V, attenuation=1.0,
+                 allow_range_substitution=False):
         self.h = c_int()
         _check(_dwf.FDwfDeviceOpen(c_int(-1), byref(self.h)) != 0 and self.h.value != 0,
                "opening the device")
         self.channels = tuple(channels)
         self.rate = rate
+        want_range = _per_channel(range_v, self.channels, "range_v")
+        want_offset = _per_channel(offset_v, self.channels, "offset_v")
+        self.attenuation = _per_channel(attenuation, self.channels, "attenuation")
+
         for ch in self.channels:
             _dwf.FDwfAnalogInChannelEnableSet(self.h, c_int(ch), c_int(1))
-            _dwf.FDwfAnalogInChannelRangeSet(self.h, c_int(ch), c_double(RANGE_V))
-            _dwf.FDwfAnalogInChannelOffsetSet(self.h, c_int(ch), c_double(OFFSET_V))
+            # Attenuation first: it rescales what a range means, so setting it
+            # afterwards would reinterpret a range that was already chosen.
+            _dwf.FDwfAnalogInChannelAttenuationSet(
+                self.h, c_int(ch), c_double(self.attenuation[ch]))
+            _dwf.FDwfAnalogInChannelRangeSet(self.h, c_int(ch), c_double(want_range[ch]))
+            _dwf.FDwfAnalogInChannelOffsetSet(self.h, c_int(ch), c_double(want_offset[ch]))
         _dwf.FDwfAnalogInAcquisitionModeSet(self.h, c_int(ACQ_RECORD))
         _dwf.FDwfAnalogInFrequencySet(self.h, c_double(rate))
+
+        # Push the settings so the device commits to a range, then read back
+        # what it actually chose. Without the configure the getters can still
+        # report what was asked for rather than what will be used.
+        _dwf.FDwfAnalogInConfigure(self.h, c_int(1), c_int(0))
+        self.range_v, self.offset_v = {}, {}
+        for ch in self.channels:
+            got_r, got_o = c_double(), c_double()
+            _dwf.FDwfAnalogInChannelRangeGet(self.h, c_int(ch), byref(got_r))
+            _dwf.FDwfAnalogInChannelOffsetGet(self.h, c_int(ch), byref(got_o))
+            self.range_v[ch], self.offset_v[ch] = got_r.value, got_o.value
+
+        if not allow_range_substitution:
+            for ch in self.channels:
+                asked, got = want_range[ch], self.range_v[ch]
+                # A few percent is the device's own calibration; 5 V nominal
+                # comes back as about 5.12. A factor is a substitution.
+                if abs(got - asked) > 0.25 * asked:
+                    atten = self.attenuation[ch]
+                    hint = (f"It offers 5 V and 50 V at the input and picks the nearest "
+                            f"it can honour. An offset the range cannot reach (here "
+                            f"{want_offset[ch]:g} V) forces the wider one too.")
+                    if atten != 1.0:
+                        hint = (f"With attenuation x{atten:g} the range is measured at the "
+                                f"PROBE, not at the input, so {asked:g} V would need "
+                                f"{asked / atten:g} V at the input. The two input ranges "
+                                f"are 5 V and 50 V, which through this probe are "
+                                f"{5 * atten:g} V and {50 * atten:g} V -- ask for one of "
+                                f"those. An unreachable offset forces the wider one too.")
+                    self.close()
+                    raise AD3Error(
+                        f"channel {ch + 1}: asked for a {asked:g} V range, the device "
+                        f"applied {got:.3f} V. {hint} Pass "
+                        f"allow_range_substitution=True to accept this one.")
+
+    def to_volts(self, ch, samples):
+        """Convert this channel's raw counts to volts, using the APPLIED range."""
+        return self.offset_v[ch] + self.range_v[ch] * np.asarray(samples, dtype=np.float64) / 65536
 
     def close(self):
         if self.h.value:
@@ -129,24 +218,91 @@ class AD3:
                 break
 
         data = {ch: out[ch][:pos] for ch in self.channels}
+        # The applied range and offset travel with the data: a capture saved
+        # without them cannot be converted to volts afterwards, and the numbers
+        # are not necessarily the ones that were requested.
         return data, {"samples": pos, "lost": lost_total, "corrupted": corrupt_total,
-                      "seconds": time.perf_counter() - t0}
+                      "seconds": time.perf_counter() - t0,
+                      "rate": self.rate,
+                      "range_v": dict(self.range_v),
+                      "offset_v": dict(self.offset_v),
+                      "attenuation": dict(self.attenuation)}
 
 
-def raw_threshold(volts=2.5):
-    """The int16 count corresponding to a voltage, for the configured range."""
-    return (volts - OFFSET_V) / RANGE_V * 65536
+def raw_threshold(volts=2.5, range_v=RANGE_V, offset_v=OFFSET_V):
+    """The int16 count corresponding to a voltage, for the given range.
+
+    range_v and offset_v must be the values the device APPLIED, which are in
+    AD3.range_v / AD3.offset_v and in record()'s stats. They are not always the
+    ones that were requested -- see AD3.
+    """
+    return (volts - offset_v) / range_v * 65536
 
 
-def rising_edges(samples, rate, volts=2.5):
+def _threshold_counts(samples, volts, relative, range_v, offset_v, strict, what):
+    """Resolve a threshold to raw counts, and refuse an unreachable one.
+
+    An absolute threshold that the signal never approaches produces no edges and
+    no error, which is the worst combination: the analysis downstream sees an
+    empty array and reports nothing rather than reporting a problem. That has
+    happened three times on this bench -- a 2.5 V default against a photodiode
+    peaking at 1.4 V, the same default again after a 10x probe divided the
+    signal to 0.83 V, and a range the device silently substituted. So when the
+    data plainly swing and the threshold sits outside that swing, this raises.
+
+    A genuinely flat channel is different: a line that never toggled has no
+    swing to be outside of, and zero edges is the right answer there.
+    """
+    lo, hi = np.percentile(samples, (1, 99))
+    swing = hi - lo
+    to_v = lambda c: offset_v + range_v * c / 65536  # noqa: E731
+
+    if relative is not None:
+        # A relative threshold on a channel that is not switching lands in the
+        # noise and returns a crossing every few samples -- thousands of
+        # "edges" that look like data. Refuse instead: a signal with no swing
+        # has no 50% level worth speaking of.
+        if strict and swing < 0.02 * 65536:
+            raise ValueError(
+                f"{what}: relative threshold asked for, but this channel only spans "
+                f"{to_v(hi) - to_v(lo):.4f} V ({to_v(lo):.4f} to {to_v(hi):.4f}), which "
+                f"is under 2% of the {range_v:.1f} V range and is indistinguishable from "
+                f"noise. Placing a threshold in the middle of that would return a "
+                f"crossing every few samples. Check the wiring, the probe attenuation, "
+                f"and that the signal was present during the capture; pass strict=False "
+                f"if you really mean to threshold a flat channel.")
+        thr = lo + relative * (hi - lo)
+    else:
+        thr = raw_threshold(volts, range_v, offset_v)
+
+    if strict and swing > 0.02 * 65536 and not (lo < thr < hi):
+        raise ValueError(
+            f"{what}: threshold {to_v(thr):.3f} V is outside the signal, which runs "
+            f"{to_v(lo):.3f} to {to_v(hi):.3f} V (1st to 99th percentile). Every "
+            f"crossing would be missed and the result would be an empty array rather "
+            f"than an error. Pass relative=0.5 to place the threshold at the midpoint "
+            f"of whatever the signal actually does, give a volts= inside that span, or "
+            f"pass strict=False if no edges really is the expected answer.")
+    return thr
+
+
+def rising_edges(samples, rate, volts=2.5, *, relative=None,
+                 range_v=RANGE_V, offset_v=OFFSET_V, strict=True):
     """Times (seconds from capture start) of every rising threshold crossing.
 
     Sub-sample resolved by linear interpolation between the two straddling
     samples, so the resolution is not the sample interval: at 1 MS/s the
     crossings land well inside a microsecond, which matters when the effect
     being measured is tens of microseconds.
+
+    The threshold is 2.5 V by default, which suits a 0-5 V logic line on the
+    default range and nothing else. For any other signal pass relative=0.5,
+    which puts it at the midpoint of the 1st..99th percentile of the data and so
+    needs no prior knowledge of the amplitude -- or pass volts= together with
+    the range_v/offset_v the device applied.
     """
-    thr = raw_threshold(volts)
+    thr = _threshold_counts(samples, volts, relative, range_v, offset_v,
+                            strict, "rising_edges")
     above = samples > thr
     idx = np.flatnonzero(~above[:-1] & above[1:])
     if idx.size == 0:
@@ -157,9 +313,14 @@ def rising_edges(samples, rate, volts=2.5):
     return (idx + frac) / rate
 
 
-def falling_edges(samples, rate, volts=2.5):
-    """Times of every falling threshold crossing, interpolated as above."""
-    thr = raw_threshold(volts)
+def falling_edges(samples, rate, volts=2.5, *, relative=None,
+                  range_v=RANGE_V, offset_v=OFFSET_V, strict=True):
+    """Times of every falling threshold crossing, interpolated as above.
+
+    Same threshold rules as [rising_edges].
+    """
+    thr = _threshold_counts(samples, volts, relative, range_v, offset_v,
+                            strict, "falling_edges")
     above = samples > thr
     idx = np.flatnonzero(above[:-1] & ~above[1:])
     if idx.size == 0:
@@ -176,6 +337,8 @@ if __name__ == "__main__":
         print(f"  {stats['samples']} samples in {stats['seconds']:.2f} s, "
               f"lost {stats['lost']}, corrupted {stats['corrupted']}")
         for ch, s in data.items():
-            v = OFFSET_V + RANGE_V * s.astype(np.float64) / 65536
-            print(f"  CH{ch + 1}: {v.min():+.3f} .. {v.max():+.3f} V, "
-                  f"{len(rising_edges(s, d.rate))} rising edges")
+            v = d.to_volts(ch, s)
+            n = len(rising_edges(s, d.rate, relative=0.5, strict=False))
+            print(f"  CH{ch + 1}: {v.min():+.3f} .. {v.max():+.3f} V "
+                  f"(range {d.range_v[ch]:.3f}, offset {d.offset_v[ch]:+.3f}, "
+                  f"x{d.attenuation[ch]:g}), {n} rising edges at the 50% level")
