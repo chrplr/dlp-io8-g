@@ -4,7 +4,5 @@ __pycache__/
 # Digilent WaveForms SDK drops this wherever the process runs
 DebugErc.log
 
-# Go binaries built in the tree, and editor backups
-/golang/dlpio8
-/golang/cmd/dlpio8/dlpio8
+# Editor backups
 *~

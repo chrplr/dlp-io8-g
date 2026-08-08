@@ -1,5 +1,7 @@
 # dlp-io8-g
-Code  (in Python and Go) to control the DLP-IO8-G USB-to-TTL device.
+Code and timing measurements for the DLP-IO8-G USB-to-TTL device: Python and C
+clients, and a measurement harness. The Go client lives in its own repository,
+[chrplr/dlpio8](https://github.com/chrplr/dlpio8).
 
 ![](dlp-io8-g-800.png)
 
@@ -233,199 +235,22 @@ Here is the result on an oscilloscope:
 ![](triggers-100ms.png)
       
 
-## Examples in Go
+## Go
 
-The [`golang/`](golang/) directory holds a package covering the same ground. 
-
-The module is called `dlp` rather than a URL, so `go get` will not fetch it.
-Point a module at your working copy:
-
-```bash
-go mod edit -require=dlp@v0.0.0 -replace=dlp=/path/to/dlp-io8-g/golang
-go mod tidy
-```
-
-
-`dlp.New("")` resolves the port through `/dev/serial/by-id/`, which is worth
-preferring to a hardcoded `/dev/ttyUSB0`: any other FTDI instrument competes for
-that name and which one wins depends on plug order.
-
-### The `dlpio8` command
-
-[`golang/cmd/dlpio8`](golang/cmd/dlpio8) is a command-line front end to the
-package, for checking wiring and watching lines without writing a program:
+The Go client is a separate module:
+**[github.com/chrplr/dlpio8](https://github.com/chrplr/dlpio8)**
+([reference](https://pkg.go.dev/github.com/chrplr/dlpio8)).
 
 ```bash
-cd golang && go build ./cmd/dlpio8
-
-./dlpio8 ports                                  # what is attached, and which port we would pick
-./dlpio8 read                                   # all 8 inputs, once a second
-./dlpio8 read -channels 1 -interval 0 -changes  # line 1, polled flat out, printing only changes
-./dlpio8 write -high 1,3 -low 2                 # set some outputs and exit
-./dlpio8 write -mask 0x5a                       # all eight from a bitmask (still not atomic)
-./dlpio8 pulse -channels 1 -width 10ms -count 5 -period 1s
-./dlpio8 blink -period 5s                       # alternate all 8, for a scope or a logic probe
+go get github.com/chrplr/dlpio8                        # library
+go install github.com/chrplr/dlpio8/cmd/dlpio8@latest  # the command
 ```
 
-`read` writes one line per sample to stdout — seconds since start, then one 0/1
-per channel — with the connection details on stderr, so redirecting stdout gives
-a data file and still shows what it was recorded from. Every subcommand takes
-`-port` to override the USB-id lookup and `-latency-timer` to set the FTDI
-timer, which is reported at startup either way because it sets the ceiling on
-the polling rate.
-
-### Example 2 in Go: writing on lines 1 to 4
-
-```go
-// Drive lines 1-4 as a group.
-package main
-
-import (
-	"log"
-
-	"dlp"
-)
-
-func main() {
-	d, err := dlp.New("")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer d.Close()
-
-	if err := d.WriteMask(0x00); err != nil { // all eight low
-		log.Fatal(err)
-	}
-	if err := d.High(1, 2, 3, 4); err != nil {
-		log.Fatal(err)
-	}
-	if err := d.Low(1, 2, 3, 4); err != nil {
-		log.Fatal(err)
-	}
-	// WriteMask says the same thing in one call, and is equally non-atomic:
-	// it still emits one byte per line.
-	if err := d.WriteMask(0x0F); err != nil {
-		log.Fatal(err)
-	}
-}
-```
-
-`WriteMask` is a convenience, not an atomic port write — there is no such thing
-on this device. See [Do not send multi-bit codes to a fast
-sampler](#do-not-send-multi-bit-codes-to-a-fast-sampler).
-
-### Example 3 in Go: detecting changes on input line 1
-
-```go
-// Print every change of state on input line 1.
-package main
-
-import (
-	"fmt"
-	"log"
-	"time"
-
-	"dlp"
-)
-
-func main() {
-	d, err := dlp.New("")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer d.Close()
-
-	// Without this the FTDI driver batches replies at its 16 ms default and the
-	// loop below runs at 63 Hz instead of ~1 kHz. Needs write access to sysfs.
-	if err := d.SetLatencyTimer(1); err != nil {
-		log.Printf("could not lower the latency timer, polling will be slow: %v", err)
-	}
-
-	start := time.Now()
-	prev := byte(2) // impossible state, so the first reading always prints
-	for {
-		state, err := d.Read(1)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if state[0] != prev {
-			fmt.Printf("%9.6f  %d\n", time.Since(start).Seconds(), state[0])
-			prev = state[0]
-		}
-	}
-}
-```
-
-Two differences from the Python. The package defaults to the module's binary
-mode, one reply byte per channel instead of three, so nothing has to strip a
-trailing LF/CR. And `SetLatencyTimer` is on the device rather than something you
-remember to `echo` into sysfs beforehand — the setting reverts on replug, and a
-poll loop that silently runs sixteen times slower than intended is not a failure
-you notice from inside the program.
-
-### Example 4 in Go: pulses at regular intervals
-
-```go
-// Emit 1000 pulses of 10 ms at 100 ms intervals on line 1.
-package main
-
-import (
-	"fmt"
-	"log"
-	"runtime"
-	"time"
-
-	"dlp"
-)
-
-const (
-	nPeriods = 1000
-	timeHigh = 10 * time.Millisecond
-	timeLow  = 90 * time.Millisecond
-	period   = timeHigh + timeLow
-)
-
-func main() {
-	// Keep this goroutine on one OS thread, so that the thread chrt raised is
-	// the thread doing the timing.
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	d, err := dlp.New("")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer d.Close()
-
-	t0 := time.Now()
-	for i := 0; i < nPeriods; i++ {
-		// Each onset is computed from t0, not from the previous one, so a late
-		// pulse does not push every later pulse late with it.
-		for onset := t0.Add(time.Duration(i) * period); time.Now().Before(onset); {
-		}
-		if err := d.Pulse(1, timeHigh); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("\r%4d", i+1)
-	}
-	fmt.Printf("\n%d periods of %v in %v\n", nPeriods, period, time.Since(t0))
-}
-```
-
-`Pulse` busy-waits between the two writes rather than sleeping, exactly as the
-Python does, because the module has no pulse timer of its own and the width is
-whatever elapses between the host's two commands. That removes sleep granularity
-but not preemption: the realised width tracks the request to within a few tens of
-microseconds on an idle host, and stays there under full CPU load *only* at
-real-time priority — see [Timing: two things to do before collecting data on
-Linux](#timing-two-things-to-do-before-collecting-data-on-linux). Run it as
-`chrt -f 50 ./ex4`.
-
-`runtime.LockOSThread` matters more in Go than the equivalent does in Python.
-`chrt` raises every thread of the process at exec, but the Go runtime is free to
-migrate a goroutine between threads, and in-program elevation raises only the
-calling thread — so without the lock, the goroutine doing the timing is not
-reliably the one you raised.
+It covers the same ground as the Python above, plus a `dlpio8` command for
+checking wiring and watching lines without writing a program, and it can set the
+FTDI latency timer itself rather than leaving it to a shell command you remember
+to run beforehand. Worked examples are in that repository's README; the timing
+figures they cite are measured here, in [`measurements/`](measurements/).
 
 
 ## Timing: two things to do before collecting data on Linux

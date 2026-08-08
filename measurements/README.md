@@ -103,9 +103,10 @@ absolute host-to-edge latency at all, needs an oscilloscope or a BBTK.
 
 ## Discarding queued output: hypothesis not supported
 
-`clang/dlp.c` calls `tcflush(fd, TCOFLUSH)` before every write and
-`golang/dlp.go` calls `ResetOutputBuffer()`. Both discard queued output rather
-than draining it, which looked like it should be able to drop a trigger byte.
+`clang/dlp.c` calls `tcflush(fd, TCOFLUSH)` before every write, and earlier
+versions of the Go client called `ResetOutputBuffer()`. Both discard queued
+output rather than draining it, which looked like it should be able to drop a
+trigger byte.
 
 **It does not fire here.** Writing 8, 64, 200 and 1000 command bytes and
 discarding immediately afterwards, every byte still arrived — 1000/1000 in the
@@ -113,6 +114,10 @@ largest case. The reason is visible in the timing: that 1000-byte write itself
 took 55.7 ms to return, because a blocking write does not come back until the
 driver has taken the data. By the time the flush runs there is nothing left in
 the kernel queue to discard.
+
+On the strength of this result the Go client
+([github.com/chrplr/dlpio8](https://github.com/chrplr/dlpio8)) no longer flushes
+the output buffer at all; the comment in its `write` method points back here.
 
 So the flush is **pointless rather than harmful**, in this configuration. It
 would become harmful if the port were ever opened non-blocking. Removing it is

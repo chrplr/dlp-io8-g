@@ -284,9 +284,9 @@ def block_shortest(args):
       - the NeuroSpin MEG TTL box, whose firmware times a pulse itself, wired
         D30 -> DLP ch8. Its own width error is measured and small, so a pulse
         it reports as 5 ms really is;
-      - or a second DLP on another port, which is what this repository's
-        deleted golang/README.md described (-read_mode on one port, writing on
-        the other);
+      - or a second DLP on another port: poll one with
+        `dlpio8 read -channels 1 -interval 0 -changes` while writing to the
+        other (see github.com/chrplr/dlpio8);
       - or a signal generator, or the BBTK in its response-echo mode.
 
     Whichever is used, the generator must not share this process's serial port.
