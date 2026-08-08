@@ -239,6 +239,48 @@ def raw_threshold(volts=2.5, range_v=RANGE_V, offset_v=OFFSET_V):
     return (volts - offset_v) / range_v * 65536
 
 
+def logic_levels(samples, _iters=8, _stride=97):
+    """Estimate a two-level signal's low and high levels, at any duty cycle.
+
+    Returns (lo, hi) in raw counts.
+
+    The obvious rule -- take the 1st and 99th percentiles -- is wrong for a
+    pulse train, and wrong in the way that hurts most: silently. A 5 ms TTL
+    pulse every 500 ms is high 1% of the time, so the 99th percentile sits
+    almost exactly on the boundary between the two levels. Which side it lands
+    on depends on the duty cycle in the fourth decimal place.
+
+    That is not hypothetical. Two five-minute captures of the same TTL line,
+    taken twenty minutes apart, differed only in that one was 1.03% high and the
+    other 0.99%. The first put the 99th percentile at 5.02 V and found 598
+    edges; the second put it at 0.013 V, placed the "50% threshold" at 0.000 V
+    in the baseline noise, and found 118000. Nothing about the second result
+    looked like an error until someone counted the edges.
+
+    So estimate the two levels instead of a quantile of their mixture. This is
+    Lloyd's algorithm in one dimension with two clusters: split at a midpoint,
+    take the median of each side, split again at the new midpoint. It converges
+    in a handful of passes and does not care what fraction of the samples are
+    high, which is the entire point.
+
+    Medians rather than means so a slow edge, which belongs to neither level,
+    cannot drag a cluster. A genuinely flat channel converges to lo == hi within
+    the noise, so the callers' "this channel never switched" guard still fires.
+    """
+    x = np.asarray(samples)[::_stride]
+    lo, hi = np.percentile(x, (0.1, 99.9))
+    for _ in range(_iters):
+        thr = 0.5 * (lo + hi)
+        below, above = x[x < thr], x[x >= thr]
+        if not below.size or not above.size:
+            break
+        nlo, nhi = np.median(below), np.median(above)
+        if nlo == lo and nhi == hi:
+            break
+        lo, hi = nlo, nhi
+    return float(lo), float(hi)
+
+
 def _threshold_counts(samples, volts, relative, range_v, offset_v, strict, what):
     """Resolve a threshold to raw counts, and refuse an unreachable one.
 
@@ -253,7 +295,7 @@ def _threshold_counts(samples, volts, relative, range_v, offset_v, strict, what)
     A genuinely flat channel is different: a line that never toggled has no
     swing to be outside of, and zero edges is the right answer there.
     """
-    lo, hi = np.percentile(samples, (1, 99))
+    lo, hi = logic_levels(samples)
     swing = hi - lo
     to_v = lambda c: offset_v + range_v * c / 65536  # noqa: E731
 

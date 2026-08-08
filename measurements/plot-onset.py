@@ -24,12 +24,17 @@ matplotlib will not thank you for them.
 The rug beneath the traces marks each trial's own 10% crossing, so the jitter is
 visible as a distribution and not only as a fan of curves.
 """
+import os
 import sys
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ad3 import logic_levels  # noqa: E402
 
 SURFACE, INK, INK2, MUTED = "#fcfcfb", "#0b0b0b", "#52514e", "#8a8985"
 TTL_C, TRIAL_C = "#2a78d6", "#9c9b97"
@@ -49,7 +54,9 @@ if "rise_ch1" in z.files:
 else:
     # No precomputed edges: find them on CH1 at the midpoint of its own
     # 1st..99th percentile band, the same rule ad3-capture.py uses by default.
-    lo, hi = np.percentile(ttl[::97], (1, 99))
+    # logic_levels, not a percentile: a 1%-duty TTL puts the 99th percentile
+    # on the boundary between the two levels. See its docstring.
+    lo, hi = logic_levels(ttl)
     above = ttl >= lo + 0.5 * (hi - lo)
     edges = np.flatnonzero(above[1:] & ~above[:-1]) / rate
 
