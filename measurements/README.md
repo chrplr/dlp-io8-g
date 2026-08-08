@@ -25,8 +25,8 @@ client here. They exist to exercise that module on the same rig, and because the
 second measures something the Python blocks do not:
 
 ```bash
-cd measurements && go build ./...
-
+cd measurements
+go build ./cmd/roundtrip ./cmd/pulsetrain        # binaries named for their packages
 sudo ./roundtrip -trials 300 -out <dir>          # ch1 -> ch2 jumper, sweeps the timer
 ./ad3-capture.py --seconds 150 --out cap.npz &   # started first, outlives the emitter
 chrt -f 50 ./pulsetrain -trials 1000 -condition rt -out train.csv
@@ -124,22 +124,49 @@ and neither can anything else here: **the module has no clock**, so there is no
 second timestamp to difference against. Splitting this figure, or getting an
 absolute host-to-edge latency at all, needs an oscilloscope or a BBTK.
 
-`cmd/roundtrip` is a Go port of this block, over a ch1 → ch2 jumper, writing
-`roundtrip-go-lt*.csv` with the same columns. At `latency_timer` 1 ms it gives a
-median of **0.993 ms, n=300**, against the Python's 0.996 ms at n=200 above.
+### The same, swept, in Go
 
-That agreement is worth exactly what it is and no more: the two implementations
-run the same method against the same device over the same USB path, so it
-corroborates the Go client and the port, not the physics. It is not two
-independent routes to the same quantity. What it does rule out is a systematic
-error introduced by the client library — a spurious flush, a mis-set line
-discipline, an extra round trip per read — since either implementation having
-one would separate them.
+`cmd/roundtrip` is a Go port of this block over a ch1 → ch2 jumper, writing
+`roundtrip-go-lt*.csv` with the same columns. Unlike the Python block it sweeps
+the timer in one run, which needs root; it probes sysfs for writability before
+measuring anything, so a run without `sudo` fails immediately rather than
+collecting whichever setting the machine was already in and labelling the rest
+with settings it never applied. n=300 per setting, 2026-08-08:
 
-Unlike the Python block, it sweeps the timer in one run, which needs root to
-write sysfs. It probes for that before measuring anything, so a run without
-`sudo` fails immediately rather than collecting whichever setting the machine
-happened to be in and labelling the rest with settings it never applied.
+| `latency_timer` | min | median | p95 | max | median − setting | poll rate |
+|---|---|---|---|---|---|---|
+| 1 | 0.851 | 0.994 | 1.048 | 1.102 | −6.1 µs | 1006 Hz |
+| 2 | 1.835 | 1.996 | 2.044 | 2.116 | −4.0 µs | 501 Hz |
+| 4 | 3.798 | 3.996 | 4.044 | 4.190 | −4.0 µs | 250 Hz |
+| 8 | 7.840 | 7.997 | 8.059 | 8.179 | −3.3 µs | 125 Hz |
+| 16 | 15.367 | 15.992 | 16.082 | 16.418 | −8.5 µs | 62.5 Hz |
+
+Regressing all 1500 trials on the setting rather than reading the column by eye:
+
+    round trip = 1.000053 (± 0.000225) × latency_timer − 7.5 (± 1.9) µs
+    residual SD 47.5 µs, R² 0.99992
+
+**The slope is 1 to within 2 parts in 10⁴.** Everything that is not the latency
+timer — the write, the module's own processing, both USB traversals — comes to
+−7.5 µs, which is to say nothing resolvable at this scale. The earlier statement
+that "round trip = latency_timer" was read off five medians; this is the same
+claim with an interval on it.
+
+**Every one of the 1500 trials completed in a single poll.** The first read
+issued after the write already returned 1, at every setting including 1 ms. So
+the write, the edge, and the module noticing it all fit inside one latency-timer
+period even at the shortest — an upper bound of about 1 ms on the whole
+non-polling path, and still not a way to split it, for the reason the section
+above gives.
+
+Against the Python at the two settings it also measured: 0.994 vs 0.996 ms at
+lt=1, and 15.992 vs 15.987 ms at lt=16. That agreement is worth exactly what it
+is and no more. The two implementations run the same method against the same
+device over the same USB path, so it corroborates the Go client and the port,
+not the physics — it is not two independent routes to one quantity. What it does
+rule out is a systematic error in either client library: a spurious flush, a
+mis-set line discipline, an extra round trip per read. Either one having such a
+fault would separate them.
 
 ## Discarding queued output: hypothesis not supported
 
@@ -591,8 +618,8 @@ counted in lockstep, which is what the alignment step is for.
 
 ## A note on the file schemas
 
-`2026-08-08-dlp-go/` holds the Go session. `roundtrip-go-lt1.csv` carries the
-same columns as the Python `loopback-*.csv`. `pulsetrain-<condition>.csv` is the
+`2026-08-08-dlp-go/` holds the Go session. `roundtrip-go-lt{1,2,4,8,16}.csv`
+carry the same columns as the Python `loopback-*.csv`, one file per setting. `pulsetrain-<condition>.csv` is the
 emitter's own log — what it asked for and what its clock saw — and
 `pulsetrain-paired-<condition>.csv` adds the instrument's width and the fit
 residual per trial, after alignment. `pulsetrain-edges-<condition>.npz` is the

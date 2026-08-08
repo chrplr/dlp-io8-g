@@ -10,3 +10,4 @@ DebugErc.log
 # Go binaries built in the measurements tree
 /measurements/roundtrip
 /measurements/pulsetrain
+/measurements/main
