@@ -252,6 +252,15 @@ FTDI latency timer itself rather than leaving it to a shell command you remember
 to run beforehand. Worked examples are in that repository's README; the timing
 figures they cite are measured here, in [`measurements/`](measurements/).
 
+Two measurement tools built on it live here rather than there, since they are
+instruments rather than API:
+[`measurements/cmd/roundtrip`](measurements/cmd/roundtrip) sweeps the latency
+timer over a loopback jumper, and
+[`measurements/cmd/pulsetrain`](measurements/cmd/pulsetrain) emits pulses of
+random width at random intervals for an Analog Discovery 3 to measure, so the
+realised width can be regressed on the requested one rather than summarised at a
+handful of fixed widths.
+
 
 ## Timing: two things to do before collecting data on Linux
 
@@ -286,6 +295,16 @@ interval degrades identically. Real-time priority removes it:
 | loaded, normal priority | up to +1.85 ms | up to 4.75 ms | 50 |
 | loaded, `chrt -f 50` | +33 to +47 µs | 130–150 µs | 1000 |
 
+Read the middle row as a magnitude, not as a per-width effect. It comes from
+n=50 at each of four fixed widths, and across those four the error looks like it
+depends on the width requested. It does not: a later run over 1000 pulses of
+*random* width fits a slope of 1.00110 ± 0.00246 against the request, so the
+cost of load is a fixed offset plus a heavy tail rather than anything
+proportional, and the p95 error is flat at 2.6–2.8 ms across every width
+quartile. The load was not applied identically in the two runs, so the two
+medians are not comparable — but the shape is what matters here, and the shape
+says a 5 ms pulse and a 50 ms pulse are at the same risk.
+
 ```bash
 chrt -f 50 ./my-experiment
 ```
@@ -293,6 +312,22 @@ chrt -f 50 ./my-experiment
 That needs a one-time grant — a file in `/etc/security/limits.d/` giving your
 user `rtprio 50`, then a full logout and login. The priority passed to `chrt`
 must not exceed the granted value, or it fails with "Operation not permitted".
+
+**Do not combine `chrt` with a loop that busy-waits continuously.** The kernel
+throttles real-time tasks: `sched_rt_runtime_us` is 950000 of a 1000000 period
+by default, so a `SCHED_FIFO` process that never yields is *suspended for 50 ms
+once a second*. An experiment that spins through its inter-trial intervals as
+well as its pulses sits at 100% duty and collects that stall in the middle of
+whatever it was timing. Measured, spinning the gaps at `chrt -f 50`: 23 of 1000
+trials hit, worst pulse-width error **49.63 ms**, the hits landing on
+one-second boundaries — comfortably worse than the millisecond of scheduling
+jitter real-time priority was bought to avoid.
+
+Sleep between trials and spin only the last fraction of a millisecond before
+each edge. That keeps the duty cycle low enough that the throttle never fires,
+and costs nothing in timing: `measurements/cmd/pulsetrain` does exactly this,
+and under load at `chrt -f 50` its pulse widths track the request with a
+residual SD of 108 µs against 995 µs at normal priority.
 
 ## Why no absolute latency is quoted here
 
@@ -354,6 +389,13 @@ does exactly that, and across 1, 2, 4, 8 and 16 ms:
 
     bare poll  =  0.9984 x latency_timer  -  1.4 us
     loopback   =  0.9994 x latency_timer  -  3.7 us
+
+A second, independent implementation — the Go client, n=300 per setting rather
+than 200, over a different jumper (ch1 → ch2 rather than ch1 → ch8) — puts an
+interval on the same fit:
+
+    loopback   =  1.000053 (+/- 0.000225) x latency_timer  -  7.5 (+/- 1.9) us
+                 residual SD 47.5 us, R^2 0.99992
 
 Slope essentially exactly 1, and **both intercepts within a few microseconds of
 zero**. Extrapolating the FTDI batching to nothing, everything else in the loop —
