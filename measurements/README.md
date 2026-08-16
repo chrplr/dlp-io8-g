@@ -72,6 +72,34 @@ host was busiest, which is exactly where the interesting trials are.
 
 ---
 
+## Scripts here that are not about the DLP-IO8-G
+
+`ad3.py` and `ad3-capture.py` are instrument code, not device code: a WaveForms
+wrapper and a two-channel capture CLI, with nothing DLP-specific in either. They
+have a second user, which is why this note exists — a reader looking for the AD3
+toolchain will not think to look in a repo named for a USB TTL box, and neither
+did its author on 2026-08-16.
+
+- `extract-av-sync.py` — audio-visual lag from a photodiode and a microphone
+  recorded on one AD3 acquisition, for
+  [goxpyriment](https://github.com/chrplr/goxpyriment)'s `Timing-Tests -test av`.
+  The microphone cannot use `rising_edges` (a 440 Hz tone crosses any threshold
+  880 times a second), so it computes a running-RMS envelope and takes the
+  crossing there. It also counts silence inside a tone, which is how an audio
+  buffer that underruns shows itself — measured at 23 % of tones on a Raspberry
+  Pi 4 at 512 frames, and audible as scratching, while every host-side statistic
+  stayed clean.
+
+  Validated on a synthetic capture rather than against hardware truth: a planted
+  26.500 ms lag came back as 23.210 ms — the two 10 % level choices plus the
+  envelope window, a constant — with SD 0.013 ms and 5 of 5 planted dropouts
+  found. Treat the absolute lag as uncalibrated and the scatter and slope as
+  measurements.
+
+The intention is to move `ad3.py` and `ad3-capture.py` into a repo of their own
+and have this one depend on it, leaving the DLP campaign's analysis
+(`dlp_timing.py`, `analyse-pulse*.py`, `plot-*`) here.
+
 ## The headline: the FTDI latency timer
 
 The driver default is **16 ms**, and nothing in this repository has ever changed
