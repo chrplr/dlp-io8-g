@@ -37,10 +37,23 @@ unaffected. The absolute figure is not a calibration and should not be quoted as
 one without a known-simultaneous reference.
 
 Measured on a synthetic capture (100 kS/s, a 6 ms panel ramp, a 2 ms tone attack,
-a true onset difference of 26.500 ms): recovered 23.210 ms, SD 0.013, slope
-+0.14 us/trial. The 3.3 ms shortfall is the sum of the two level choices and this
-window — a constant, exactly as described — while the SD shows the method itself
-adds essentially no jitter at this sample rate.
+a true onset difference of 26.500 ms): recovered 25.590 ms, SD 0.074. The 0.9 ms
+shortfall is the sum of the two level choices and this window — a constant,
+exactly as described — while the SD shows the method itself adds essentially no
+jitter at this sample rate.
+
+# What the synthetic did NOT catch
+
+Three bugs were found by real captures in one afternoon on 2026-08-17, all of
+which this file's synthetic test passed: duplicate trial anchors from threshold
+chatter on the panel's ramp, the tone's own attack counted as a dropout, and the
+crossing search clamped at the anchor so every lag came out 6.68 ms short. None
+announced itself; each produced a plausible number.
+
+What caught all three was an impossible one — 15801 "edges" on an audio channel,
+an identical 0.57 ms gap in all 481 tones, a 2.61 ms lag under a 5.33 ms buffer.
+So the checks that earn their place here are the ones that compare a result
+against a physical bound, not the ones that compare it against a fixture.
 
 # Why the level is a fraction of each trial's own plateau
 
@@ -60,15 +73,19 @@ panel's black level is guaranteed to hold still for 500 seconds.
 An audio buffer the machine cannot keep filled underruns, which puts silence in
 the middle of a tone. It is audible as scratching and invisible in every
 host-side statistic, because the software hands the tone over on time either
-way. Measured on a Raspberry Pi 4 through a BBTK microphone channel on
-2026-08-16: at 512 frames on PipeWire, 23% of 1010 tones were split by a gap
-whose median was 22.3 ms and whose minimum was 20.3 ms — about two buffer
-periods, which is the signature of a dropout rather than of a detector.
+way — measured in the same runs, the software-side SOA read 0.080 ms +- 0.035
+throughout.
 
-That measurement was quantised to the instrument's 0.25 ms. Here the envelope is
-sampled at the capture rate, so a gap is resolved to `--smooth-ms` instead, and
-`gaps` counts them per trial. A run with any is a run whose audio onsets are
-worth distrusting.
+Measured on a Raspberry Pi 4 (PipeWire, 48 kHz), capturing the line output
+directly at 100 kS/s on 2026-08-17: 2.0% of 500 tones torn at 512 frames, 20.7%
+of 483 at 256, none in 481 at 1024. Gaps ran from 0.5 to 37.7 ms. A BBTK
+microphone channel had reported the 512 case as 23% of tones with gaps whose
+median was 22.3 ms; the tearing is real, but a threshold detector watching an
+acoustic envelope needs the signal to recover past its threshold before it calls
+the tone present again, so it reports gaps far longer than the electrical ones.
+
+Set `--gap-ms` below the shortest glitch worth knowing about: the first one found
+here was 1.9 ms, well under the 5 ms default.
 
 # Why trials are dropped
 
@@ -128,7 +145,10 @@ def main():
     p.add_argument("--smooth-ms", type=float, default=2.5,
                    help="RMS window for the audio envelope; one period of the tone "
                         "(default 2.5, i.e. 440 Hz)")
-    p.add_argument("--pre-ms", type=float, default=8.0, help="baseline window before the flash (default 8)")
+    p.add_argument("--pre-ms", type=float, default=30.0,
+                   help="window searched before the anchor, and the baseline taken from its "
+                        "first third. Must exceed how far the 10%% crossing precedes the 50%% "
+                        "anchor — 6.7 ms on a 16 ms panel transition (default 30)")
     p.add_argument("--post-ms", type=float, default=150.0,
                    help="how far after the flash to look for the tone (default 150)")
     p.add_argument("--min-amplitude", type=float, default=0.5,
@@ -214,30 +234,56 @@ def main():
             continue
 
         lseg, aseg = light[a:b], env[a:b]
-        lbase = np.median(lseg[:PRE])
-        lpeak = np.percentile(lseg[PRE:], 90)
+        # Search the WHOLE window, not just from the anchor onward.
+        #
+        # The anchor is a 50% crossing and the onsets are 10% crossings, so both
+        # happen BEFORE it — on this panel the light reaches 10% a median of
+        # 6.68 ms before it reaches 50%, because the transition takes 16 ms.
+        # Searching forward from the anchor clamped that to zero and silently
+        # turned every lag into audio-minus-light-at-50%, 6.68 ms too small; at
+        # a short buffer, where the sound arrives before the panel is half lit,
+        # it clamped the audio too and 51 of 483 trials read exactly 0.000.
+        # Nothing prevents a lag being negative and the code must not either.
+        BASE = max(1, PRE // 3)
+        lbase = np.median(lseg[:BASE])
+        lpeak = np.percentile(lseg, 90)
         if lpeak - lbase < floor:
             low += 1
             continue
-        li = crossing(lseg[PRE:], lbase, lpeak, args.level)
+        li = crossing(lseg, lbase, lpeak, args.level)
         if li is None:
             no_light += 1
             continue
 
-        abase = np.median(aseg[:PRE])
-        apeak = np.percentile(aseg[PRE:], 90)
-        ai = crossing(aseg[PRE:], abase, apeak, args.level)
+        abase = np.median(aseg[:BASE])
+        apeak = np.percentile(aseg, 90)
+        ai = crossing(aseg, abase, apeak, args.level)
         if ai is None:
             no_audio += 1
             continue
 
-        light_ms.append((a + PRE + li) / rate * 1000)
-        audio_ms.append((a + PRE + ai) / rate * 1000)
+        light_ms.append((a + li) / rate * 1000)
+        audio_ms.append((a + ai) / rate * 1000)
 
-        # Dropouts, measured from the tone's own onset onward: a run of samples
-        # below --gap-level of this trial's plateau, lasting at least --gap-ms.
-        body = aseg[PRE + ai:]
-        quiet = body < abase + args.gap_level * (apeak - abase)
+        # Dropouts: a run of samples below --gap-level of this trial's plateau,
+        # lasting at least --gap-ms.
+        #
+        # The search starts where the envelope FIRST REACHES that level, not at
+        # the onset. Starting at the onset counts the tone's own attack as a
+        # gap, because the onset is by definition the 10% crossing and 10% is
+        # below any sensible gap level. That stayed invisible while --gap-ms was
+        # larger than the attack and then reported 481 of 481 tones torn, each
+        # by the same 0.57 ms, the moment a 481-tone capture was analysed at
+        # --gap-ms 0.5. Identical "defects" in every trial are the signature of
+        # the analysis, not the apparatus.
+        quiet_level = abase + args.gap_level * (apeak - abase)
+        risen = np.flatnonzero(aseg[ai:] >= quiet_level)
+        if not risen.size:
+            gaps.append(0)
+            gap_ms.append(0.0)
+            continue
+        body = aseg[ai + int(risen[0]):]
+        quiet = body < quiet_level
         n_gap, longest, run = 0, 0, 0
         for q in quiet:
             run = run + 1 if q else 0
