@@ -128,8 +128,18 @@ def main():
             kw["relative"] = 0.5
         else:
             kw["volts"] = float(args.threshold)
-        rise = rising_edges(data[ch], args.rate, **kw)
-        fall = falling_edges(data[ch], args.rate, **kw)
+        # A flat channel must not cost the capture. rising_edges refuses to
+        # threshold noise, which is the right call for an analysis and the wrong
+        # one here: this runs BEFORE the file is written, so on 2026-08-17 an
+        # unplugged second channel discarded a 330 s recording — 5.5 minutes of
+        # a stimulus that cannot be re-run on demand — for want of edges nobody
+        # needed yet. The refusal is now a warning and the samples are saved.
+        try:
+            rise = rising_edges(data[ch], args.rate, **kw)
+            fall = falling_edges(data[ch], args.rate, **kw)
+        except ValueError as e:
+            print(f"  CH{ch+1}: no usable edges — {e}")
+            rise = fall = np.empty(0)
         total_rise += len(rise)
         v = applied_o[ch] + applied_r[ch] * data[ch].astype(np.float64) / 65536
         lo, hi = np.percentile(v, (1, 99))
@@ -156,12 +166,15 @@ def main():
         out["channel"] = chans[0] + 1
         out["threshold"] = out[f"threshold_v_ch{chans[0]+1}"]
 
-    if total_rise == 0:
-        sys.exit("  no rising edge on any channel: check the wiring, the probe "
-                 "attenuation, and that the emitter ran inside the capture window.")
-
+    # Written before any complaint about content: the recording is the
+    # expensive, unrepeatable part and the edges are derived from it.
     np.savez_compressed(args.out, **out)
     print(f"\n  wrote {args.out}")
+
+    if total_rise == 0:
+        sys.exit("  no rising edge on any channel: check the wiring, the probe "
+                 "attenuation, and that the emitter ran inside the capture window. "
+                 "The samples were saved regardless.")
 
 
 if __name__ == "__main__":
