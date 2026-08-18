@@ -28,7 +28,7 @@ second measures something the Python blocks do not:
 cd measurements
 go build ./cmd/roundtrip ./cmd/pulsetrain        # binaries named for their packages
 sudo ./roundtrip -trials 300 -out <dir>          # ch1 -> ch2 jumper, sweeps the timer
-./ad3-capture.py --seconds 150 --out cap.npz &   # started first, outlives the emitter
+ad3-capture --seconds 150 --out cap.npz &        # started first, outlives the emitter
 chrt -f 50 ./pulsetrain -trials 1000 -condition rt -out train.csv
 ./analyse-pulsetrain.py train.csv cap.npz --out paired.csv
 ```
@@ -58,7 +58,7 @@ must absorb all of it; but the draining loop also does its own work per
 iteration, and if that work allocates, the interpreter is doing memory
 management inside the window where the on-board buffer is filling. Captures at
 1 MS/s lost a buffer even at real-time priority, where scheduling cannot be the
-cause. `ad3.py` preallocates its output for that reason, and the streaming blocks
+cause. ad3-capture preallocates its output for that reason, and the streaming blocks
 default to 250 kS/s.
 
 That ceiling is a property of firing trials from inside the drain loop, not of
@@ -72,33 +72,43 @@ host was busiest, which is exactly where the interesting trials are.
 
 ---
 
-## Scripts here that are not about the DLP-IO8-G
+## Dependency: ad3-capture
 
-`ad3.py` and `ad3-capture.py` are instrument code, not device code: a WaveForms
-wrapper and a two-channel capture CLI, with nothing DLP-specific in either. They
-have a second user, which is why this note exists — a reader looking for the AD3
-toolchain will not think to look in a repo named for a USB TTL box, and neither
-did its author on 2026-08-16.
+The AD3 instrument code used to live here — `ad3.py` and `ad3-capture.py` — and
+now lives in [ad3-capture](https://github.com/chrplr/ad3-capture), with the
+commit history. It was never DLP-specific: a WaveForms wrapper and a two-channel
+capture CLI, with a second user in
+[goxpyriment](https://github.com/chrplr/goxpyriment)'s display and
+audio-visual timing. A reader looking for the AD3 toolchain would not think to
+look in a repo named for a USB TTL box, and on 2026-08-16 neither did its author.
 
-- `extract-av-sync.py` — audio-visual lag from a photodiode and a microphone
-  recorded on one AD3 acquisition, for
-  [goxpyriment](https://github.com/chrplr/goxpyriment)'s `Timing-Tests -test av`.
-  The microphone cannot use `rising_edges` (a 440 Hz tone crosses any threshold
-  880 times a second), so it computes a running-RMS envelope and takes the
-  crossing there. It also counts silence inside a tone, which is how an audio
-  buffer that underruns shows itself — measured at 23 % of tones on a Raspberry
-  Pi 4 at 512 frames, and audible as scratching, while every host-side statistic
-  stayed clean.
+Everything here that touches the AD3 needs it installed:
+
+```bash
+pip install -e ../ad3-capture      # or from wherever it is checked out
+```
+
+`dlp_timing.py`'s `pulse-stream` and `h2h-stream` blocks, `extract-onsets.py`,
+`extract-av-sync.py` and `plot-onset.py` all `import ad3`; the capture command is
+now `ad3-capture` on PATH rather than `./ad3-capture.py` in this directory.
+
+### Still here, and arguably shouldn't be
+
+- `extract-av-sync.py` — audio-visual lag from a photodiode and an audio channel
+  recorded on one AD3 acquisition, for goxpyriment's `Timing-Tests -test av`.
+  The audio channel cannot use `rising_edges` (a 440 Hz tone crosses any
+  threshold 880 times a second), so it computes a running-RMS envelope and takes
+  the crossing there. It also counts silence inside a tone, which is how an
+  audio buffer that underruns shows itself.
 
   Validated on a synthetic capture rather than against hardware truth: a planted
-  26.500 ms lag came back as 23.210 ms — the two 10 % level choices plus the
-  envelope window, a constant — with SD 0.013 ms and 5 of 5 planted dropouts
+  26.500 ms lag came back as 25.590 ms — the two 10 % level choices plus the
+  envelope window, a constant — with SD 0.074 ms and 5 of 5 planted dropouts
   found. Treat the absolute lag as uncalibrated and the scatter and slope as
   measurements.
 
-The intention is to move `ad3.py` and `ad3-capture.py` into a repo of their own
-and have this one depend on it, leaving the DLP campaign's analysis
-(`dlp_timing.py`, `analyse-pulse*.py`, `plot-*`) here.
+  It belongs with goxpyriment rather than here; it stays for now because moving
+  it is a separate decision from extracting the instrument code.
 
 ## The headline: the FTDI latency timer
 
@@ -536,7 +546,7 @@ fails to see its own edge — is the one that catches this.
 
 ## Pulse width against request, by regression
 
-`cmd/pulsetrain` + `ad3-capture.py` + `analyse-pulsetrain.py` measure something
+`cmd/pulsetrain` + `ad3-capture` + `analyse-pulsetrain.py` measure something
 the `pulse` and `pulse-stream` blocks do not. Those step through a handful of
 fixed widths and summarise each; this samples widths uniformly on [5, 50] ms and
 inter-pulse intervals uniformly on [10, 100] ms, and fits
@@ -659,7 +669,7 @@ pulse also stalls the drain, and the device's 16384-sample buffer is only
 the falling edge is. Hence that block's refusal to run fast when the widths are
 long, and its 250 kS/s default.
 
-`pulsetrain` is a separate process from `ad3-capture.py`, so the drain loop is
+`pulsetrain` is a separate process from `ad3-capture`, so the drain loop is
 never held by anything. That removes the constraint rather than working around
 it: the capture runs at 1 MS/s for ~1 µs edge resolution regardless of pulse
 width. The cost is that the two have to be paired afterwards instead of being

@@ -711,7 +711,6 @@ def block_h2h_stream(args):
     Wiring: DLP ch1 on AD3 channel 1, TTL box D30 on channel 2, common ground.
     Use the ANALOG inputs -- the digital ones are 3.3 V and these are 5 V lines.
     """
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from ad3 import AD3, rising_edges
 
     from ttlbox_min import TTLBoxMin
@@ -899,7 +898,6 @@ def block_pulse_stream(args):
     not describe. Raw per-trial widths are recorded so the histogram can be
     drawn rather than summarised away.
     """
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from ad3 import AD3, falling_edges, rising_edges
 
     policy, prio = scheduling_now()

@@ -33,8 +33,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ad3 import logic_levels  # noqa: E402
+from ad3 import logic_levels
 
 SURFACE, INK, INK2, MUTED = "#fcfcfb", "#0b0b0b", "#52514e", "#8a8985"
 TTL_C, TRIAL_C = "#2a78d6", "#9c9b97"
