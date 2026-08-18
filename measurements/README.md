@@ -92,23 +92,12 @@ pip install -e ../ad3-capture      # or from wherever it is checked out
 `extract-av-sync.py` and `plot-onset.py` all `import ad3`; the capture command is
 now `ad3-capture` on PATH rather than `./ad3-capture.py` in this directory.
 
-### Still here, and arguably shouldn't be
+### Gone with it: extract-av-sync.py
 
-- `extract-av-sync.py` — audio-visual lag from a photodiode and an audio channel
-  recorded on one AD3 acquisition, for goxpyriment's `Timing-Tests -test av`.
-  The audio channel cannot use `rising_edges` (a 440 Hz tone crosses any
-  threshold 880 times a second), so it computes a running-RMS envelope and takes
-  the crossing there. It also counts silence inside a tone, which is how an
-  audio buffer that underruns shows itself.
-
-  Validated on a synthetic capture rather than against hardware truth: a planted
-  26.500 ms lag came back as 25.590 ms — the two 10 % level choices plus the
-  envelope window, a constant — with SD 0.074 ms and 5 of 5 planted dropouts
-  found. Treat the absolute lag as uncalibrated and the scatter and slope as
-  measurements.
-
-  It belongs with goxpyriment rather than here; it stays for now because moving
-  it is a separate decision from extracting the instrument code.
+The audio-visual lag analysis moved to
+[goxpyriment](https://github.com/chrplr/goxpyriment) (`cmd/extract-av-sync.py`)
+on 2026-08-18, where the runs it analyses come from. Its history — three bug
+fixes found by real captures in one afternoon — is in this repo's log.
 
 ## The headline: the FTDI latency timer
 
